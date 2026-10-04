@@ -17,6 +17,28 @@ from pokemon_ev_tracker.games.platinum.nuzlocke import (
 )
 
 
+def test_platinum_honey_tree_locations_have_unique_encounter_rows(tmp_path) -> None:
+    honey_tree_locations = {
+        *(f"Route {number}" for number in (
+            205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 218, 221, 222,
+        )),
+        "Eterna Forest",
+        "Floaroma Meadow",
+        "Fuego Ironworks",
+        "Valley Windworks",
+    }
+    locations = PLATINUM_NUZLOCKE_PROFILE.locations
+    assert all(sum(location.name == name for location in locations) == 1
+               for name in honey_tree_locations)
+
+    run = NuzlockeStore(tmp_path / "runs.json").create_run(
+        "Platinum", PLATINUM_NUZLOCKE_PROFILE
+    )
+    assert honey_tree_locations <= {
+        encounter.location for encounter in run.encounters.values()
+    }
+
+
 def test_run_create_switch_delete_and_runs_keep_independent_state(tmp_path) -> None:
     store = NuzlockeStore(tmp_path / "nuzlocke_runs.json")
     first = store.create_run("Platinum Randomizer #1", PLATINUM_NUZLOCKE_PROFILE)
@@ -106,18 +128,19 @@ def test_platinum_profile_has_ordered_locations_and_caps() -> None:
     location_names = {item.name for item in profile.locations}
 
     assert profile.game_id == "pokemon-platinum"
-    assert len(profile.locations) == 66
+    assert len(profile.locations) == 67
     assert [item.order for item in profile.locations] == list(range(len(profile.locations)))
     assert profile.locations[0].name == "Starter"
     assert profile.locations[0].location_id == "platinum-starter"
     assert profile.locations[1].name == "Twinleaf Town"
     assert {"Sandgem Town", "Jubilife City", "Oreburgh City"}.isdisjoint(location_names)
     assert {
-        "Route 201", "Route 202", "Oreburgh Gate", "Oreburgh Mine",
+        "Route 201", "Route 202", "Oreburgh Gate", "Oreburgh Mine", "Hearthome City",
         "Twinleaf Town", "Eterna City", "Canalave City", "Pastoria City",
         "Celestic Town", "Sunyshore City", "Pokémon League",
     } <= location_names
-    assert len(PLATINUM_RETIRED_DEFAULT_LOCATIONS) == 17
+    assert next(item for item in profile.locations if item.name == "Hearthome City").location_id == "platinum-025"
+    assert len(PLATINUM_RETIRED_DEFAULT_LOCATIONS) == 16
     assert len(profile.level_caps) >= 15
     assert [item.order for item in profile.level_caps] == list(range(len(profile.level_caps)))
     rival_caps = {
@@ -157,6 +180,18 @@ def test_platinum_level_caps_include_trainer_healing_item_limits() -> None:
     assert caps["Barry - Pokémon League"].healing_item_count == 0
     assert caps["Cynthia"].healing_items == (("Full Restore", 4),)
     assert caps["Barry - Route 201"].healing_item_count == 0
+
+
+def test_platinum_level_caps_use_platinum_boss_ace_levels() -> None:
+    caps = {cap.name: cap.level_cap for cap in PLATINUM_NUZLOCKE_PROFILE.level_caps}
+
+    assert caps["Mars - Valley Windworks"] == 17
+    assert caps["Jupiter - Eterna Building"] == 23
+    assert caps["Crasher Wake"] == 37
+    assert caps["Cyrus - Veilstone HQ"] == 46
+    assert caps["Mars & Jupiter - Spear Pillar"] == 46
+    assert caps["Cyrus - Distortion World"] == 48
+    assert caps["Candice"] == 44
 
 
 def test_location_cleanup_removes_only_pristine_retired_defaults(tmp_path) -> None:

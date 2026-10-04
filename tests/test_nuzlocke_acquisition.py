@@ -441,6 +441,267 @@ def test_first_party_member_after_empty_baseline_is_suggested_as_starter(tmp_pat
     assert later_events[0].source != "STARTER"
 
 
+def test_full_party_box_catch_uses_met_location_and_moves_never_duplicate(tmp_path) -> None:
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver()
+    party = tuple(_candidate(f"pid:party-{index}") for index in range(6))
+    existing_boxed = _candidate("pid:old-boxed", source_location="BOX")
+    observer.observe(
+        (*party, existing_boxed),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    )
+
+    caught = _candidate(
+        "pid:abra",
+        species_id=63,
+        species_name="Abra",
+        met_location_id=0x12,
+        met_level=6,
+        source_location="BOX",
+    )
+    events = observer.observe(
+        (*party, existing_boxed, caught),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    )
+
+    assert len(events) == 1
+    assert events[0].species_name == "Abra"
+    assert events[0].level == 6
+    assert events[0].met_location_name == "Route 203"
+    assert events[0].suggested_location_id == _location_id("Route 203")
+    assert events[0].source_location == "BOX"
+
+    for moved in (
+        replace(caught, source_location="PARTY"),
+        replace(caught, source_location="BOX"),
+    ):
+        assert observer.observe(
+            (*party, existing_boxed, moved),
+            connected=True,
+            valid_snapshot=True,
+            run=run,
+            store=store,
+            classify=classify_platinum_acquisition,
+        ) == ()
+
+    reloaded_store = NuzlockeStore(tmp_path / "runs.json")
+    assert reloaded_store.active_run.acquisition_events[0].source_location == "BOX"
+    restarted = PartyAcquisitionObserver()
+    assert restarted.observe(
+        (*party, replace(caught, source_location="PARTY")),
+        connected=True,
+        valid_snapshot=True,
+        run=reloaded_store.active_run,
+        store=reloaded_store,
+        classify=classify_platinum_acquisition,
+    ) == ()
+
+
+def test_box_to_party_move_is_suppressed_across_separate_observers(tmp_path) -> None:
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    party_observer = PartyAcquisitionObserver()
+    box_observer = PartyAcquisitionObserver()
+    party = tuple(_candidate(f"pid:party-{index}") for index in range(6))
+    boxed = _candidate(
+        "pid:full-party-catch", species_id=63, species_name="Abra",
+        met_location_id=0x12, met_level=6, source_location="BOX",
+    )
+    party_observer.observe(
+        party, connected=True, valid_snapshot=True, run=run, store=store,
+        classify=classify_platinum_acquisition,
+    )
+    box_observer.observe(
+        (), connected=True, valid_snapshot=True, run=run, store=store,
+        classify=classify_platinum_acquisition,
+    )
+
+    box_events = box_observer.observe(
+        (boxed,), connected=True, valid_snapshot=True, run=run, store=store,
+        classify=classify_platinum_acquisition,
+    )
+    assert len(box_events) == 1
+    assert box_events[0].source_location == "BOX"
+    assert box_observer.last_decision["status"] == "pending"
+    assert box_observer.last_decision["already_observed"] is False
+
+    party_events = party_observer.observe(
+        (*party[:5], replace(boxed, source_location="PARTY")),
+        connected=True, valid_snapshot=True, run=run, store=store,
+        classify=classify_platinum_acquisition,
+    )
+    assert party_events == ()
+    assert len(run.acquisition_events) == 1
+    assert party_observer.last_decision["status"] == "suppressed"
+    assert party_observer.last_decision["reason"] == "already observed or recorded"
+
+
+def test_box_observer_preserves_baseline_across_transient_disconnect(tmp_path) -> None:
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver(reset_on_disconnect=False)
+    existing = _candidate("pid:existing", source_location="BOX")
+    caught = _candidate(
+        "pid:caught-while-disconnected", species_id=63, species_name="Abra",
+        met_location_id=0x12, met_level=6, source_location="BOX",
+    )
+    observer.observe(
+        (existing,), connected=True, valid_snapshot=True, run=run, store=store,
+        classify=classify_platinum_acquisition,
+    )
+    observer.observe(
+        (), connected=False, valid_snapshot=False, run=run, store=store,
+        classify=classify_platinum_acquisition,
+    )
+
+    events = observer.observe(
+        (existing, caught), connected=True, valid_snapshot=True, run=run,
+        store=store, classify=classify_platinum_acquisition,
+    )
+
+    assert len(events) == 1
+    assert events[0].stable_id == caught.stable_id
+    assert events[0].source_location == "BOX"
+
+
+def test_party_to_box_move_does_not_create_a_second_acquisition(tmp_path) -> None:
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver()
+    moved = _candidate("pid:moved", 403, "Shinx", 0x11, 4)
+    remaining_party = tuple(_candidate(f"pid:party-{index}") for index in range(5))
+    observer.observe(
+        (*remaining_party, moved),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    )
+
+    assert observer.observe(
+        (*remaining_party, replace(moved, source_location="BOX")),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    ) == ()
+
+
+def test_known_boxed_identity_is_suppressed_after_save_state_rollback(tmp_path) -> None:
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver()
+    party = tuple(_candidate(f"pid:party-{index}") for index in range(6))
+    boxed = _candidate("pid:rollback", 63, "Abra", 0x12, 6, source_location="BOX")
+    observer.observe(
+        party,
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    )
+    detected = observer.observe(
+        (*party, boxed),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    )
+    assert len(detected) == 1
+
+    after_rollback = PartyAcquisitionObserver()
+    assert after_rollback.observe(
+        (*party, replace(boxed, source_location="PARTY")),
+        connected=True,
+        valid_snapshot=True,
+        run=store.active_run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    ) == ()
+
+
+def test_newly_enabled_box_source_is_baselined_without_false_encounters(tmp_path) -> None:
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver()
+    party_member = _candidate("pid:party")
+    observer.observe(
+        (party_member,),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    )
+    already_boxed = _candidate("pid:preexisting-box", source_location="BOX")
+    observer.baseline_candidates((already_boxed,), run=run, store=store)
+
+    assert observer.observe(
+        (party_member, already_boxed),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify_platinum_acquisition,
+    ) == ()
+    assert store.has_observed_pokemon(run.run_id, already_boxed.stable_id)
+
+
+def test_box_candidate_does_not_receive_first_party_override(tmp_path) -> None:
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver()
+    def classify(_candidate, _run):
+        return "WILD", "HIGH", "route"
+
+    def first_party(_candidate, _run):
+        return "STARTER", "HIGH", "platinum-starter"
+    observer.observe(
+        (),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify,
+    )
+    boxed = _candidate("pid:boxed-first", source_location="BOX")
+    boxed_event = observer.observe(
+        (boxed,),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify,
+        classify_first_party=first_party,
+    )
+    assert boxed_event[0].source == "WILD"
+
+    starter = _candidate("pid:first-party")
+    party_event = observer.observe(
+        (boxed, starter),
+        connected=True,
+        valid_snapshot=True,
+        run=run,
+        store=store,
+        classify=classify,
+        classify_first_party=first_party,
+    )
+    assert party_event[0].source == "STARTER"
+
+
 def test_first_party_starter_assumption_is_disabled_for_populated_baseline(tmp_path) -> None:
     store = NuzlockeStore(tmp_path / "runs.json")
     run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)

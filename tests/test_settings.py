@@ -23,6 +23,8 @@ def test_settings_round_trip(tmp_path) -> None:
         "compact_mode",
         "tracker_view",
         "friendship_walk_axis",
+        "pc_box1_species_id",
+        "pc_box1_nickname",
         "window_geometry",
         "normal_window_geometry",
     }
@@ -69,6 +71,8 @@ def test_load_default_migrates_only_tracker_preferences(monkeypatch, tmp_path) -
         "compact_mode",
         "tracker_view",
         "friendship_walk_axis",
+        "pc_box1_species_id",
+        "pc_box1_nickname",
         "window_geometry",
         "normal_window_geometry",
     }

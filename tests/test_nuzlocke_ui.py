@@ -108,7 +108,7 @@ def _acquisition_event(stable_id="pid:shinx", *, source="WILD", suggested="Route
     )
 
 
-def test_party_only_scope_and_new_acquisition_can_be_added_to_suggested_route(
+def test_new_acquisition_can_be_added_to_suggested_route(
     nuzlocke_view,
 ) -> None:
     _app, view, store = nuzlocke_view
@@ -117,7 +117,8 @@ def test_party_only_scope_and_new_acquisition_can_be_added_to_suggested_route(
     store.record_acquisition_event(run.run_id, _acquisition_event())
     view._refresh_all()
 
-    assert "requires the Pokémon to appear in the party" in view.party_detection_scope_label.text()
+    assert view.acquisition_group.title() == "New Pokémon"
+    assert "Last acquisition candidate" in view.acquisition_status_label.text()
     assert view.acquisition_selector.currentData() == "pid:shinx"
     assert view.acquisition_location_selector.currentText() == "Route 202"
     assert view.accept_acquisition_button.isEnabled()
@@ -131,6 +132,7 @@ def test_party_only_scope_and_new_acquisition_can_be_added_to_suggested_route(
         4,
     )
     assert run.resolved_acquisition_ids == ["pid:shinx"]
+    assert "status: accepted" in view.acquisition_status_label.text()
 
 
 def test_occupied_suggestion_requires_replace_extra_or_ignore(nuzlocke_view) -> None:
@@ -154,6 +156,37 @@ def test_occupied_suggestion_requires_replace_extra_or_ignore(nuzlocke_view) -> 
     view.ignore_acquisition_button.click()
     assert run.resolved_acquisition_ids == ["pid:dupe"]
     assert run.encounters[route_id].species == "Bidoof"
+    assert "status: ignored" in view.acquisition_status_label.text()
+
+
+def test_box_candidate_at_oreburgh_mine_uses_duplicate_location_actions(nuzlocke_view) -> None:
+    _app, view, store = nuzlocke_view
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    location = next(
+        item for item in PLATINUM_NUZLOCKE_PROFILE.locations
+        if item.name == "Oreburgh Mine"
+    )
+    store.update_encounter(
+        run.run_id,
+        EncounterRecord(location.location_id, location.name, "CAUGHT", "Geodude", "", 5),
+    )
+    event = replace(
+        _acquisition_event("pid:boxed-oreburgh", suggested="Oreburgh Mine"),
+        source_location="BOX",
+        met_location_id=0x2E,
+        met_location_name="Oreburgh Mine",
+    )
+    store.record_acquisition_event(run.run_id, event)
+
+    view._refresh_all()
+
+    assert view.acquisition_selector.currentData() == event.stable_id
+    assert "Stored in PC" in view.acquisition_detail_label.text()
+    assert view.acquisition_location_selector.currentText() == "Oreburgh Mine"
+    assert not view.accept_acquisition_button.isEnabled()
+    assert view.replace_acquisition_button.isEnabled()
+    assert view.extra_acquisition_button.isEnabled()
+    assert view.ignore_acquisition_button.isEnabled()
 
 
 def test_suggestion_location_can_be_manually_overridden(nuzlocke_view) -> None:

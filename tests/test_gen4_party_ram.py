@@ -7,6 +7,12 @@ import pytest
 from pokemon_ev_tracker.data_sources.bizhawk import BizHawkRamDataSource
 from pokemon_ev_tracker.games.platinum.decoder import decode_party, nickname_is_default
 from pokemon_ev_tracker.games.platinum.memory import PLATINUM_US
+from pokemon_ev_tracker.games.platinum.pc_storage import (
+    PC_BOX_RECORDS_SIZE,
+    PC_BOXES_PAGE_ID,
+    PC_BOXES_PAGE_SIZE,
+    decode_pc_storage_payload,
+)
 from pokemon_ev_tracker.pokemon.gen4.crypto import (
     BOX_DATA_SIZE,
     block_order,
@@ -26,6 +32,7 @@ from pokemon_ev_tracker.pokemon.gen4.structure import (
     HELD_ITEM_BOX_DATA_OFFSET,
     HELD_ITEM_RECORD_OFFSET,
     PARTY_POKEMON_SIZE,
+    decode_box_pokemon,
     decode_party_pokemon,
 )
 from pokemon_ev_tracker.ui.party_layout import party_card_positions
@@ -656,6 +663,407 @@ def test_encrypt_decrypt_roundtrip() -> None:
     encrypted = encrypt_box_data(plain, pid, checksum)
 
     assert decrypt_box_data(encrypted, pid, checksum) == plain
+
+
+def _boxed_fixture(
+    *, pid: int = 0x12345678, species_id: int = 399, nickname: str = "beaver"
+) -> bytes:
+    party = _party_record(
+        pid=pid,
+        species_id=species_id,
+        evs=(0, 0, 0, 0, 0, 0),
+        nickname=nickname,
+    )
+    plain = bytearray(decrypt_box_data(party[0x08:0x88], pid, int.from_bytes(party[6:8], "little")))
+    plain[0x3E:0x40] = (0x12).to_bytes(2, "little")
+    plain[0x7C] = 6
+    checksum = calculate_checksum(bytes(plain))
+    return party[:6] + checksum.to_bytes(2, "little") + encrypt_box_data(bytes(plain), pid, checksum)
+
+
+def _pc_storage_scan_payload(frame: int, records: tuple[tuple[int, int, bytes], ...]) -> dict:
+    save_body_address = 0x022711C8
+    pc_boxes_address = save_body_address + 0x8000
+    records_address = pc_boxes_address + 4
+    return {
+        "type": "pc_storage",
+        "run_id": "test-run",
+        "frame": frame,
+        "scan_ok": True,
+        "save_data_pointer": hex(save_body_address),
+        "save_data_body_address": hex(save_body_address),
+        "save_data_struct_address_inferred": hex(save_body_address - 0x14),
+        "page_info_address": hex(save_body_address + 0x20010 + PC_BOXES_PAGE_ID * 0x10),
+        "page_id": PC_BOXES_PAGE_ID,
+        "page_block_id": 1,
+        "page_location": "0x8000",
+        "page_size": hex(PC_BOXES_PAGE_SIZE),
+        "pc_boxes_address": hex(pc_boxes_address),
+        "records_address": hex(records_address),
+        "records_offset": hex(records_address - 0x02000000),
+        "final_address_valid": True,
+        "box_count": 18,
+        "slots_per_box": 30,
+        "record_stride": 136,
+        "records_scanned": 540,
+        "bytes_read": PC_BOX_RECORDS_SIZE,
+        "scan_duration_ms": 3,
+        "records": [
+            {
+                "box": box,
+                "slot": slot,
+                "address": hex(records_address + ((box - 1) * 30 + slot - 1) * 136),
+                "raw_hex": raw.hex(),
+            }
+            for box, slot, raw in records
+        ],
+    }
+
+
+def test_box_pk4_decoder_reuses_gen4_checksum_nickname_and_encounter_fields() -> None:
+    record = _boxed_fixture()
+
+    decoded = decode_box_pokemon(record, address=0x02290004)
+
+    assert len(record) == 136
+    assert decoded.checksum_valid
+    assert decoded.species_id == 399
+    assert decoded.nickname == "beaver"
+    assert decoded.met_location_id == 0x12
+    assert decoded.met_level == 6
+    assert decoded.pid == 0x12345678
+    assert decoded.stable_id == "pid:12345678:ot:0000:0000"
+    assert decoded.address == 0x02290004
+
+
+def test_pc_storage_payload_skips_empty_and_checksum_invalid_box_slots() -> None:
+    valid_record = _boxed_fixture()
+    invalid_record = bytearray(_boxed_fixture(pid=0x87654321, species_id=403, nickname="stripe"))
+    invalid_record[0x20] ^= 0x40
+    payload = {
+        "scan_ok": True,
+        "save_data_pointer": "0x022711C8",
+        "save_data_body_address": "0x022711C8",
+        "save_data_struct_address_inferred": "0x022711B4",
+        "page_info_address": "0x02291428",
+        "page_id": PC_BOXES_PAGE_ID,
+        "page_block_id": 1,
+        "page_location": "0x00008000",
+        "page_size": "0x121D0",
+        "pc_boxes_address": "0x022791C8",
+        "records_address": "0x022791CC",
+        "records_offset": "0x002791CC",
+        "final_address_valid": True,
+        "box_count": 18,
+        "slots_per_box": 30,
+        "record_stride": 136,
+        "records_scanned": 540,
+        "bytes_read": PC_BOX_RECORDS_SIZE,
+        "frame": 120,
+        "scan_duration_ms": 11,
+        "records": [
+            {"box": 1, "slot": 1, "address": "0x022791CC", "raw_hex": valid_record.hex()},
+            {"box": 2, "slot": 30, "address": "0x0227B144", "raw_hex": bytes(136).hex()},
+            {"box": 3, "slot": 4, "address": "0x0227B344", "raw_hex": invalid_record.hex()},
+        ],
+    }
+
+    storage = decode_pc_storage_payload(payload)
+
+    assert storage is not None and storage.available
+    assert storage.box_count == 18
+    assert storage.slots_per_box == 30
+    assert storage.record_stride == 136
+    assert storage.records_scanned == 540
+    assert storage.bytes_read == 73_440
+    assert len(storage.records) == 2
+    assert len(storage.valid_pokemon) == 1
+    assert storage.records[0].box_index == 1
+    assert storage.records[1].box_index == 3
+    assert storage.records[0].raw_hex.replace(" ", "").lower() == valid_record.hex()
+    assert storage.checksum_failures == 1
+    assert storage.empty_records == 538
+    assert storage.page_id == 37
+    assert storage.page_block_id == 1
+    assert PC_BOXES_PAGE_SIZE == 0x121D0
+
+
+def test_pc_storage_payload_rejects_inconsistent_runtime_layout_metadata() -> None:
+    state = decode_pc_storage_payload(
+        {
+            "scan_ok": True,
+            "page_id": 47,
+            "page_block_id": 1,
+            "page_size": hex(PC_BOXES_PAGE_SIZE),
+            "page_location": "0x8000",
+            "box_count": 18,
+            "slots_per_box": 30,
+            "record_stride": 136,
+            "records_scanned": 540,
+            "records": [],
+        }
+    )
+
+    assert state is not None
+    assert not state.available
+    assert "metadata" in state.error
+
+
+def test_pc_storage_accepts_decomp_save_table_index_for_pc_boxes() -> None:
+    payload = _pc_storage_scan_payload(60, ())
+
+    state = decode_pc_storage_payload(payload)
+
+    assert state is not None
+    assert state.available
+    assert state.page_id == 37
+    assert state.save_data_body_address == 0x022711C8
+    assert state.save_data_struct_address_inferred == 0x022711B4
+    assert state.page_info_address == 0x02291428
+    assert state.pc_boxes_address == 0x022791C8
+    assert state.records_address == 0x022791CC
+    assert state.bytes_read == 73_440
+    assert state.empty_records == 540
+
+
+def test_pc_storage_skips_zero_header_empty_slot_with_nonzero_payload() -> None:
+    empty = bytes(8) + bytes([0xA5]) * (136 - 8)
+    payload = _pc_storage_scan_payload(60, ((1, 1, empty),))
+
+    state = decode_pc_storage_payload(payload)
+
+    assert state is not None and state.available
+    assert state.records == ()
+    assert state.empty_records == 540
+
+
+def test_pc_storage_accepts_only_current_lua_session_cache_metadata() -> None:
+    address = 0x02080000
+    payload = _pc_storage_scan_payload(60, ())
+    payload.update(
+        {
+            "pc_storage_resolver_kind": "session_pc_cache",
+            "pc_storage_resolver_status": "resolved for this session",
+            "session_pc_first_record_address": f"0x{address:08X}",
+            "lua_run_id": "lua-current",
+            "session_pc_run_id": "lua-current",
+            "pc_boxes_address": f"0x{address:08X}",
+            "records_address": f"0x{address:08X}",
+            "records_offset": hex(address - 0x02000000),
+            "final_address_valid": True,
+        }
+    )
+
+    current = decode_pc_storage_payload(payload)
+    assert current is not None and current.available
+    assert current.session_pc_first_record_address == address
+    assert current.lua_run_id == "lua-current"
+
+    payload["session_pc_run_id"] = "previous-lua"
+    stale = decode_pc_storage_payload(payload)
+    assert stale is not None and not stale.available
+    assert "Session PC resolver metadata is invalid" in stale.error
+
+
+def test_session_pc_cache_rejects_malformed_occupied_record() -> None:
+    address = 0x02080000
+    record = bytearray(_boxed_fixture())
+    record[0x20] ^= 0x40
+    payload = _pc_storage_scan_payload(60, ((1, 1, bytes(record)),))
+    payload.update({
+        "pc_storage_resolver_kind": "session_pc_cache",
+        "pc_storage_resolver_status": "resolved for this session",
+        "session_pc_first_record_address": f"0x{address:08X}",
+        "lua_run_id": "lua-current",
+        "session_pc_run_id": "lua-current",
+        "pc_boxes_address": f"0x{address:08X}",
+        "records_address": f"0x{address:08X}",
+        "records_offset": hex(address - 0x02000000),
+    })
+    payload["records"][0]["address"] = f"0x{address:08X}"
+
+    state = decode_pc_storage_payload(payload)
+
+    assert state is not None and not state.available
+    assert "malformed occupied record" in state.error
+
+    payload["malformed_records"] = 1
+    state = decode_pc_storage_payload(payload)
+    assert state is not None and not state.available
+    assert "metadata" in state.error
+
+
+def test_pc_storage_runtime_page_validation_failure_is_reported_not_decoded() -> None:
+    state = decode_pc_storage_payload(
+        {"scan_ok": False, "scan_error": "SaveData PC page validation failed."}
+    )
+
+    assert state is not None
+    assert not state.available
+    assert state.error == "SaveData PC page validation failed."
+    assert state.records == ()
+
+
+def test_pc_storage_null_pointer_failure_is_reported_not_decoded() -> None:
+    state = decode_pc_storage_payload(
+        {
+            "scan_ok": False,
+            "scan_error": "Runtime base pointer is unavailable or outside Main RAM.",
+            "save_data_pointer": None,
+            "records": [],
+        }
+    )
+
+    assert state is not None
+    assert not state.available
+    assert state.save_data_pointer is None
+    assert "Runtime base pointer" in state.error
+    assert state.records == ()
+
+
+def test_pc_storage_out_of_range_pointer_failure_is_reported_not_decoded() -> None:
+    state = decode_pc_storage_payload(
+        {
+            "scan_ok": False,
+            "scan_error": "Runtime base pointer is outside Main RAM.",
+            "save_data_pointer": "0x03000000",
+            "save_data_body_address": "0x03000000",
+            "records": [],
+        }
+    )
+
+    assert state is not None
+    assert not state.available
+    assert state.save_data_body_address == 0x03000000
+    assert "outside Main RAM" in state.error
+    assert state.records == ()
+
+
+def test_pc_storage_rejects_old_full_savedata_struct_pageinfo_math() -> None:
+    payload = _pc_storage_scan_payload(60, ())
+    payload["page_info_address"] = "0x0229143C"
+    payload["pc_boxes_address"] = "0x022791DC"
+    payload["records_address"] = "0x022791E0"
+    payload["records_offset"] = "0x002791E0"
+
+    state = decode_pc_storage_payload(payload)
+
+    assert state is not None
+    assert not state.available
+    assert "metadata" in state.error
+
+
+def test_pc_storage_rejects_impossible_zero_page_location() -> None:
+    payload = _pc_storage_scan_payload(60, ())
+    payload["page_location"] = "0x0"
+    payload["pc_boxes_address"] = payload["save_data_body_address"]
+    payload["records_address"] = hex(int(payload["pc_boxes_address"], 16) + 4)
+    payload["records_offset"] = hex(int(payload["records_address"], 16) - 0x02000000)
+
+    state = decode_pc_storage_payload(payload)
+
+    assert state is not None
+    assert not state.available
+    assert "metadata" in state.error
+
+
+def test_new_box_identity_must_have_two_stable_checksums_before_acquisition() -> None:
+    source = BizHawkRamDataSource(server=object())
+    empty_payload = _pc_storage_scan_payload(60, ())
+    empty_state = decode_pc_storage_payload(empty_payload)
+    assert empty_state is not None
+    source._stabilize_pc_storage_payload(empty_state, SimpleNamespace(payload=empty_payload))
+
+    record = _boxed_fixture(pid=0xAABBCCDD, species_id=63, nickname="abra")
+    first_payload = _pc_storage_scan_payload(120, ((1, 1, record),))
+    first_state = decode_pc_storage_payload(first_payload)
+    assert first_state is not None
+    first_stable = source._stabilize_pc_storage_payload(
+        first_state, SimpleNamespace(payload=first_payload)
+    )
+    assert first_stable == ()
+
+    second_payload = _pc_storage_scan_payload(180, ((1, 1, record),))
+    second_state = decode_pc_storage_payload(second_payload)
+    assert second_state is not None
+    second_stable = source._stabilize_pc_storage_payload(
+        second_state, SimpleNamespace(payload=second_payload)
+    )
+    assert [mon.species_id for mon in second_stable] == [63]
+    assert [mon.species_id for mon in source._pc_storage_changes] == [63]
+
+
+def test_session_pc_monitor_does_not_rebaseline_when_party_pointer_moves() -> None:
+    source = BizHawkRamDataSource(server=object())
+    existing = _boxed_fixture(pid=0x10203040, species_id=415, nickname="mitsu")
+    caught = _boxed_fixture(pid=0x11223344, species_id=74, nickname="rocky")
+    first_address = 0x02080000
+
+    def scan(frame, records, party_pointer):
+        payload = _pc_storage_scan_payload(frame, records)
+        payload.update({
+            "pc_storage_resolver_kind": "session_pc_cache",
+            "pc_storage_resolver_status": "resolved for this session",
+            "session_pc_first_record_address": f"0x{first_address:08X}",
+            "lua_run_id": "same-lua-run",
+            "session_pc_run_id": "same-lua-run",
+            "rom_session_identity": "same-rom",
+            "save_data_pointer": hex(party_pointer),
+            "pc_boxes_address": f"0x{first_address:08X}",
+            "records_address": f"0x{first_address:08X}",
+            "records_offset": hex(first_address - 0x02000000),
+        })
+        for item in payload["records"]:
+            item["address"] = hex(
+                first_address + ((item["box"] - 1) * 30 + item["slot"] - 1) * 136
+            )
+        state = decode_pc_storage_payload(payload)
+        assert state is not None and state.available
+        return state, SimpleNamespace(payload=payload)
+
+    baseline = scan(60, ((1, 1, existing),), 0x02271140)
+    source._stabilize_pc_storage_payload(*baseline)
+    assert source._pc_storage_monitor_debug["status"] == "baseline"
+
+    first_sighting = scan(120, ((1, 1, existing), (1, 2, caught)), 0x02272140)
+    assert [mon.stable_id for mon in source._stabilize_pc_storage_payload(*first_sighting)] == [
+        "pid:10203040:ot:0000:0000"
+    ]
+    assert len(source._pc_storage_monitor_debug["added"]) == 1
+    assert len(source._pc_storage_monitor_debug["pending_stability"]) == 1
+
+    stable_sighting = scan(420, ((1, 1, existing), (1, 2, caught)), 0x02272140)
+    source._stabilize_pc_storage_payload(*stable_sighting)
+    assert [mon.stable_id for mon in source._pc_storage_changes] == [
+        "pid:11223344:ot:0000:0000"
+    ]
+    assert source._pc_storage_monitor_debug["stable_new"][0]["slot"] == 2
+
+
+def test_first_valid_pc_scan_baselines_existing_boxed_pokemon_immediately() -> None:
+    source = BizHawkRamDataSource(server=object())
+    existing = _boxed_fixture(pid=0x10203040, species_id=399, nickname="bidoof")
+    payload = _pc_storage_scan_payload(60, ((4, 12, existing),))
+    state = decode_pc_storage_payload(payload)
+    assert state is not None
+
+    stable = source._stabilize_pc_storage_payload(state, SimpleNamespace(payload=payload))
+
+    assert len(stable) == 1
+    assert stable[0].stable_id == "pid:10203040:ot:0000:0000"
+
+
+def test_pc_storage_payload_rejects_misaddressed_box_records() -> None:
+    payload = _pc_storage_scan_payload(
+        60, ((1, 1, _boxed_fixture(pid=0xAABBCCDD, species_id=63, nickname="abra")),)
+    )
+    payload["records"][0]["address"] = "0x02280000"
+
+    state = decode_pc_storage_payload(payload)
+
+    assert state is not None
+    assert not state.available
+    assert "record addresses" in state.error
 
 
 def _plain_box(

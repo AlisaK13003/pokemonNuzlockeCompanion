@@ -179,15 +179,16 @@ class NuzlockeView(QWidget):
         self.ram_death_group.hide()
         content.addWidget(self.ram_death_group)
 
-        self.acquisition_group = QGroupBox("New Party Pokémon")
+        self.acquisition_group = QGroupBox("New Pokémon")
         self.acquisition_group.setObjectName("acquisitionPanel")
         acquisition_layout = QVBoxLayout(self.acquisition_group)
-        self.party_detection_scope_label = QLabel(
-            "Automatic capture detection currently requires the Pokémon to appear in the party."
-        )
-        self.party_detection_scope_label.setWordWrap(True)
-        self.party_detection_scope_label.setProperty("uiRole", "muted")
-        acquisition_layout.addWidget(self.party_detection_scope_label)
+        self.detection_sources_label = QLabel("Automatic encounter detection: Paused")
+        self.detection_sources_label.setProperty("uiRole", "muted")
+        acquisition_layout.addWidget(self.detection_sources_label)
+        self.acquisition_status_label = QLabel("Last acquisition candidate: --")
+        self.acquisition_status_label.setWordWrap(True)
+        self.acquisition_status_label.setProperty("uiRole", "muted")
+        acquisition_layout.addWidget(self.acquisition_status_label)
         self.auto_record_acquisitions = QCheckBox("Automatically record unambiguous encounters")
         self.auto_record_acquisitions.setToolTip(
             "Only unused, clearly mapped wild locations are recorded automatically."
@@ -200,7 +201,7 @@ class NuzlockeView(QWidget):
         )
         self.auto_confirm_deaths.toggled.connect(self._set_auto_confirm_deaths)
         acquisition_layout.addWidget(self.auto_confirm_deaths)
-        self.acquisition_detail_label = QLabel("No new party Pokémon detected.")
+        self.acquisition_detail_label = QLabel("No new Pokémon detected.")
         self.acquisition_detail_label.setWordWrap(True)
         suggestion_detail = QHBoxLayout()
         suggestion_detail.addWidget(self.acquisition_detail_label, 1)
@@ -488,6 +489,17 @@ class NuzlockeView(QWidget):
             return
         self._render_acquisition_suggestions()
 
+    def report_acquisition_trace(self, trace: dict[str, object]) -> None:
+        self.acquisition_status_label.setText(
+            "Last acquisition candidate:\n"
+            f"source: {trace.get('source') or '--'}\n"
+            f"pokemon: {trace.get('pokemon') or '--'} "
+            f"({trace.get('species') or '--'})\n"
+            f"location: {trace.get('location') or '--'}\n"
+            f"status: {trace.get('status') or '--'}"
+            + (f" ({trace['reason']})" if trace.get("reason") else "")
+        )
+
     def _render_acquisition_suggestions(self) -> None:
         run = self.store.active_run
         events = pending_acquisition_events(run)
@@ -536,7 +548,7 @@ class NuzlockeView(QWidget):
         event = self._selected_acquisition()
         run = self.store.active_run
         if not event or not run:
-            self.acquisition_detail_label.setText("No new party Pokémon detected.")
+            self.acquisition_detail_label.setText("No new Pokémon detected.")
             self.acquisition_location_selector.setEnabled(False)
             for button in (
                 self.accept_acquisition_button,
@@ -547,13 +559,21 @@ class NuzlockeView(QWidget):
                 button.setEnabled(False)
             return
 
+        self.report_acquisition_trace({
+            "source": event.source_location,
+            "pokemon": event.nickname or event.species_name,
+            "species": event.species_name,
+            "location": event.suggested_location_name or event.met_location_name,
+            "status": "pending",
+        })
         met = event.met_location_name or f"Unknown location #{event.met_location_id}"
         shown_level = event.met_level or event.level
         level_text = f"Lv. {shown_level}" if shown_level else "Level unknown"
         suggested = event.suggested_location_name or "Choose a location"
+        storage_hint = " · Stored in PC" if event.source_location == "BOX" else ""
         self.acquisition_detail_label.setText(
             f"{event.nickname + ' · ' if event.nickname and event.nickname != event.species_name else ''}"
-            f"{event.species_name} · {level_text}\nMet at {met} · {event.source.title()} ({event.confidence.lower()} confidence)\n"
+            f"{event.species_name} · {level_text}\nMet at {met} · {event.source.title()} ({event.confidence.lower()} confidence){storage_hint}\n"
             f"Suggested: {suggested}"
         )
         self.acquisition_location_selector.setEnabled(True)
@@ -821,6 +841,14 @@ class NuzlockeView(QWidget):
         except (OSError, ValueError, KeyError) as error:
             self._show_error("Could not record acquisition", error)
             return
+        self.report_acquisition_trace({
+            "source": event.source_location,
+            "pokemon": event.nickname or event.species_name,
+            "species": event.species_name,
+            "location": event.suggested_location_name or event.met_location_name,
+            "status": "accepted",
+            "reason": mode,
+        })
         self._refresh_all()
 
     def _ignore_selected_acquisition(self) -> None:
@@ -833,6 +861,13 @@ class NuzlockeView(QWidget):
         except OSError as error:
             self._show_error("Could not ignore acquisition", error)
             return
+        self.report_acquisition_trace({
+            "source": event.source_location,
+            "pokemon": event.nickname or event.species_name,
+            "species": event.species_name,
+            "location": event.suggested_location_name or event.met_location_name,
+            "status": "ignored",
+        })
         self.refresh_acquisition_suggestions()
 
     def _switch_run(self, index: int) -> None:

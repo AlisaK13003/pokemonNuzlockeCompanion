@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime
+from functools import lru_cache
+from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
@@ -14,6 +17,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -25,6 +29,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStatusBar,
     QTabWidget,
     QVBoxLayout,
@@ -59,14 +64,23 @@ from pokemon_ev_tracker.games.platinum.locations import (
     platinum_nuzlocke_location_id,
 )
 from pokemon_ev_tracker.games.platinum.nuzlocke import PLATINUM_NUZLOCKE_PROFILE
+from pokemon_ev_tracker.games.platinum.pc_storage import (
+    BOX_POKEMON_SIZE,
+    PC_BOX_COUNT,
+    PC_BOX_RECORDS_SIZE,
+    PC_BOX_SLOTS,
+    SAVE_DATA_POINTER_ADDRESS,
+)
 from pokemon_ev_tracker.games.platinum.player_position import decode_player_position
 from pokemon_ev_tracker.games.platinum.profile import PLATINUM_PROFILE
+from pokemon_ev_tracker.games.platinum.species import load_gen4_species
 from pokemon_ev_tracker.pokemon.gen4.friendship import friendship_label
 from pokemon_ev_tracker.pokemon.gen4.structure import (
     HELD_ITEM_BOX_DATA_OFFSET,
     HELD_ITEM_RECORD_OFFSET,
     IVS_BOX_DATA_OFFSET,
     IVS_RECORD_OFFSET,
+    decode_box_pokemon,
 )
 from pokemon_ev_tracker.transport.bizhawk_server import FriendshipWalkCommandReceipt
 from pokemon_ev_tracker.ui.backend_status import BackendStatusWidget
@@ -96,8 +110,31 @@ class _CoordinateAnalysisSignals(QObject):
     completed = Signal(object)
 
 
+class _NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
 def _format_optional_hex(value: int | None) -> str:
     return f"0x{value:08X}" if value is not None else "--"
+
+
+def _parse_optional_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            return None
+    return None
+
+
+@lru_cache(maxsize=1)
+def _gen4_species_names() -> dict[int, str]:
+    return {species.national_dex_number: species.name for species in load_gen4_species()}
 
 
 def _acquisition_candidate(pokemon) -> AcquisitionCandidate:
@@ -117,6 +154,30 @@ def _acquisition_candidate(pokemon) -> AcquisitionCandidate:
         egg_location_id=pokemon.egg_location_id,
         origin_game=pokemon.origin_game,
         is_egg=pokemon.is_egg,
+        source_location="PARTY",
+    )
+
+
+def _boxed_acquisition_candidate(pokemon) -> AcquisitionCandidate:
+    decoded = pokemon.decoded
+    nickname = decoded.nickname or ""
+    if nickname_is_default(nickname, pokemon.species_name):
+        nickname = ""
+    return AcquisitionCandidate(
+        stable_id=decoded.stable_id,
+        species_id=decoded.species_id,
+        species_name=pokemon.species_name,
+        nickname=nickname,
+        level=decoded.met_level,
+        met_level=decoded.met_level,
+        met_location_id=decoded.met_location_id,
+        met_location_name=pokemon.met_location_name,
+        egg_location_id=decoded.egg_location_id,
+        origin_game=decoded.origin_game,
+        is_egg=decoded.is_egg,
+        source_location="BOX",
+        box_index=pokemon.box_index,
+        slot_index=pokemon.slot_index,
     )
 
 
@@ -213,6 +274,44 @@ class MainWindow(QMainWindow):
             profiles=(PLATINUM_NUZLOCKE_PROFILE,),
         )
         self._acquisition_observer = PartyAcquisitionObserver()
+        self._pc_acquisition_observer = PartyAcquisitionObserver(reset_on_disconnect=False)
+        self._pc_storage_tracking_active = False
+        self._pc_storage_baseline_key = None
+        self._pc_storage_baseline_ids: set[str] = set()
+        self._pc_storage_post_baseline_ids: set[str] = set()
+        self._pc_storage_emitted_box_ids: set[str] = set()
+        self._pc_resolver_lifecycle = "unresolved"
+        self._pc_monitoring_ready = False
+        self._pc_lua_run_id: str | None = None
+        self._pc_auto_discovery_requested_runs: set[str] = set()
+        self._pc_last_event = "No PC events yet."
+        self._last_acquisition_trace_timestamp = 0.0
+        self._pc_scan_requested_at: float | None = None
+        self._pc_discovery_requested_at: float | None = None
+        self._pc_anchor_requested_at: float | None = None
+        self._pc_anchor_requested_address: int | None = None
+        self._pc_layout_requested_at: float | None = None
+        self._pc_auto_rediscovery_key = None
+        self._pc_inspection_requested_at: float | None = None
+        self._pc_inspection_requested_address: int | None = None
+        self._pc_search_requested_at: float | None = None
+        self._pc_search_requested_address: int | None = None
+        self._pc_pointer_search_requested_at: float | None = None
+        self._pc_save_offset_test_requested_at: float | None = None
+        self._last_pc_save_offset_test_key = None
+        self._last_pc_save_offset_test_text = (
+            "No save-file PC offset test has been run."
+        )
+        self._pc_sram_search_requested_at: float | None = None
+        self._pc_sram_search_target: tuple[str, int] | None = None
+        self._last_pc_sram_search_key = None
+        self._last_pc_sram_search_text = (
+            "Search live SRAM once, move the target Pokemon without using the in-game Save command, then search again."
+        )
+        self._pc_last_inspected_address: int | None = None
+        self._last_pc_storage_discovery_text = "No PC storage discovery scan has been run."
+        self._last_pc_storage_discovery_key = None
+        self._last_pc_storage_scan_frame: int | None = None
         self._party_hp_observer = PartyHpObserver()
         self.compact_mode = False
         self.tracker_view = "training"
@@ -409,6 +508,342 @@ class MainWindow(QMainWindow):
         )
         debug_layout.addWidget(self.backend_details_section)
         self._build_coordinate_discovery(debug_layout, debug_page)
+        self.pc_storage_summary_label = QLabel("Waiting for PC storage scan.")
+        self.pc_storage_summary_label.setWordWrap(True)
+        self.pc_storage_scan_button = QPushButton("Scan PC Now")
+        self.pc_storage_scan_button.setToolTip(
+            "Request an immediate PC-box RAM scan from the BizHawk Lua script."
+        )
+        self.pc_storage_scan_button.clicked.connect(self._request_pc_storage_scan)
+        self.pc_storage_discovery_button = QPushButton("Discover PC Storage Address")
+        self.pc_storage_discovery_button.setToolTip(
+            "Run a one-shot Main RAM search for checksum-valid Gen IV boxed Pokemon."
+        )
+        self.pc_storage_discovery_button.clicked.connect(self._request_pc_storage_discovery)
+        self.pc_storage_discovery_cancel_button = QPushButton("Cancel Discovery")
+        self.pc_storage_discovery_cancel_button.setToolTip(
+            "Stop the active incremental PC storage discovery scan."
+        )
+        self.pc_storage_discovery_cancel_button.setEnabled(False)
+        self.pc_storage_discovery_cancel_button.clicked.connect(
+            self._cancel_pc_storage_discovery
+        )
+        self.pc_storage_scan_status_label = QLabel("Automatic scan: every 60 frames")
+        self.pc_storage_discovery_status_label = QLabel("idle")
+        self.pc_storage_discovery_status_label.setWordWrap(True)
+        self.pc_storage_discovery_status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        pc_storage_toolbar = QHBoxLayout()
+        pc_storage_toolbar.addWidget(self.pc_storage_scan_button)
+        pc_storage_toolbar.addWidget(self.pc_storage_discovery_button)
+        pc_storage_toolbar.addWidget(self.pc_storage_discovery_cancel_button)
+        pc_storage_toolbar.addWidget(QLabel("Discovery:"))
+        pc_storage_toolbar.addWidget(self.pc_storage_discovery_status_label, 1)
+        pc_storage_toolbar.addWidget(self.pc_storage_scan_status_label, 1)
+        pc_save_test_toolbar = QHBoxLayout()
+        pc_save_file_layout = QHBoxLayout()
+        pc_save_file_layout.addWidget(QLabel("External SaveRAM fallback directory:"))
+        self.pc_save_offset_directory_edit = QLineEdit(
+            self._default_bizhawk_save_ram_directory()
+        )
+        self.pc_save_offset_directory_edit.setPlaceholderText(
+            "Select BizHawk's NDS\\SaveRAM directory"
+        )
+        self.pc_save_offset_directory_edit.setToolTip(
+            "Optional fallback only. The live SRAM-domain search does not read or depend on files in this directory."
+        )
+        pc_save_file_layout.addWidget(self.pc_save_offset_directory_edit, 1)
+        self.pc_save_offset_directory_browse_button = QPushButton("Browse")
+        self.pc_save_offset_directory_browse_button.setToolTip(
+            "Select BizHawk's configured NDS SaveRAM directory."
+        )
+        self.pc_save_offset_directory_browse_button.clicked.connect(
+            self._browse_pc_save_offset_directory
+        )
+        pc_save_file_layout.addWidget(self.pc_save_offset_directory_browse_button)
+        self.pc_save_offset_test_button = QPushButton("Test Save-File PC Offsets (fallback)")
+        self.pc_save_offset_test_button.setToolTip(
+            "Optional fallback experiment using external SaveRAM files when the live SRAM domain is unavailable. "
+            "It is separate from Search SRAM for Box Pokemon."
+        )
+        self.pc_save_offset_test_button.clicked.connect(
+            self._request_pc_save_offset_test
+        )
+        pc_save_test_toolbar.addWidget(self.pc_save_offset_test_button)
+        pc_save_test_toolbar.addWidget(QLabel("Save test:"))
+        self.pc_save_offset_test_status_label = QLabel("idle")
+        self.pc_save_offset_test_status_label.setWordWrap(True)
+        self.pc_save_offset_test_status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        pc_save_test_toolbar.addWidget(self.pc_save_offset_test_status_label, 1)
+        pc_sram_search_toolbar = QHBoxLayout()
+        self.pc_sram_search_button = QPushButton("Search SRAM for Box Pokemon")
+        self.pc_sram_search_button.setToolTip(
+            "Incrementally read the live BizHawk SRAM domain, then search for the selected boxed Pokemon. "
+            "Click again after moving it without saving in-game to compare captures."
+        )
+        self.pc_sram_search_button.clicked.connect(self._request_pc_sram_pokemon_search)
+        pc_sram_search_toolbar.addWidget(self.pc_sram_search_button)
+        self.pc_sram_reset_target_button = QPushButton("Reset A/B Target")
+        self.pc_sram_reset_target_button.clicked.connect(self._reset_pc_sram_search_target)
+        pc_sram_search_toolbar.addWidget(self.pc_sram_reset_target_button)
+        pc_sram_search_toolbar.addWidget(QLabel("SRAM search:"))
+        self.pc_sram_search_status_label = QLabel("idle")
+        self.pc_sram_search_status_label.setWordWrap(True)
+        self.pc_sram_search_status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        pc_sram_search_toolbar.addWidget(self.pc_sram_search_status_label, 1)
+        pc_storage_session_toolbar = QHBoxLayout()
+        pc_storage_session_toolbar.addWidget(QLabel("Box 1 Slot 1:"))
+        self.pc_layout_nickname_edit = QLineEdit(self.settings.pc_box1_nickname)
+        self.pc_layout_nickname_edit.setMaxLength(10)
+        self.pc_layout_nickname_edit.setPlaceholderText("nickname (optional)")
+        pc_storage_session_toolbar.addWidget(self.pc_layout_nickname_edit)
+        self.pc_layout_species_combo = _NoWheelComboBox()
+        for species in load_gen4_species():
+            self.pc_layout_species_combo.addItem(
+                species.name, species.national_dex_number
+            )
+        self.pc_layout_species_combo.setCurrentIndex(
+            max(0, self.pc_layout_species_combo.findData(self.settings.pc_box1_species_id))
+        )
+        pc_storage_session_toolbar.addWidget(self.pc_layout_species_combo)
+        self.pc_discover_current_layout_button = QPushButton("Rediscover PC Layout")
+        self.pc_discover_current_layout_button.clicked.connect(
+            self._rediscover_pc_layout
+        )
+        self.pc_layout_retry_button = QPushButton("Retry Discovery")
+        self.pc_layout_retry_button.clicked.connect(self._rediscover_pc_layout)
+        pc_storage_session_toolbar.addWidget(self.pc_layout_retry_button)
+        self.pc_storage_resolver_status_label = QLabel("PC resolver: unresolved")
+        self.pc_storage_resolver_status_label.setWordWrap(True)
+        self.pc_storage_resolver_address_label = QLabel("First record: --")
+        pc_storage_baseline_row = QHBoxLayout()
+        self.pc_storage_baseline_count_label = QLabel("Baseline occupied Pokemon: --")
+        pc_storage_baseline_row.addWidget(self.pc_storage_baseline_count_label)
+        self.pc_storage_monitoring_label = QLabel("Monitoring for new boxed Pokemon: no")
+        pc_storage_baseline_row.addWidget(self.pc_storage_monitoring_label)
+        pc_storage_baseline_row.addStretch(1)
+        self.pc_storage_baseline_message_label = QLabel("")
+        self.pc_storage_baseline_message_label.setWordWrap(True)
+        self.pc_storage_cache_status_label = QLabel("Cache install: not sent")
+        self.pc_storage_cache_status_label.setWordWrap(True)
+        self.pc_storage_retry_cache_button = QPushButton("Retry Cache Install")
+        self.pc_storage_retry_cache_button.setEnabled(False)
+        self.pc_storage_retry_cache_button.hide()
+        self.pc_storage_retry_cache_button.clicked.connect(self._retry_pc_storage_cache_install)
+        pc_storage_anchor_toolbar = QHBoxLayout()
+        pc_storage_anchor_toolbar.addWidget(QLabel("Pokemon RAM address:"))
+        self.pc_storage_anchor_address_edit = QLineEdit()
+        self.pc_storage_anchor_address_edit.setPlaceholderText("0x02200000")
+        self.pc_storage_anchor_address_edit.setMaxLength(10)
+        self.pc_storage_anchor_address_edit.setToolTip(
+            "Session-specific address of a known Box 1 Slot 1 record, not the proposed "
+            "0x28-byte structure base. Used for diagnosis only."
+        )
+        pc_storage_anchor_toolbar.addWidget(self.pc_storage_anchor_address_edit)
+        self.pc_storage_anchor_button = QPushButton("Scan Anchor")
+        self.pc_storage_anchor_button.setToolTip(
+            "Evaluate 18 x 30 records from this address and inspect the preceding PCBoxes bytes."
+        )
+        self.pc_storage_anchor_button.clicked.connect(
+            self._request_pc_storage_anchor_discovery
+        )
+        pc_storage_anchor_toolbar.addWidget(self.pc_storage_anchor_button)
+        self.pc_storage_anchor_status_label = QLabel("idle")
+        self.pc_storage_anchor_status_label.setWordWrap(True)
+        pc_storage_anchor_toolbar.addWidget(self.pc_storage_anchor_status_label)
+        self.pc_storage_pointer_search_button = QPushButton(
+            "Search Structure Pointers"
+        )
+        self.pc_storage_pointer_search_button.setToolTip(
+            "Incrementally search Main RAM for direct references to the proposed "
+            "0x28-byte header and first BoxPokemon record."
+        )
+        self.pc_storage_pointer_search_button.clicked.connect(
+            self._search_pc_structure_pointers
+        )
+        pc_storage_anchor_toolbar.addWidget(self.pc_storage_pointer_search_button)
+        self.pc_storage_pointer_search_status_label = QLabel("idle")
+        self.pc_storage_pointer_search_status_label.setWordWrap(True)
+        pc_storage_anchor_toolbar.addWidget(
+            self.pc_storage_pointer_search_status_label
+        )
+        self.pc_storage_inspect_button = QPushButton("Inspect Pokemon Anchor")
+        self.pc_storage_inspect_button.setToolTip(
+            "Incrementally inspect Main RAM around this record, scan aligned Pokemon records, "
+            "and search for direct pointers and matching copies."
+        )
+        self.pc_storage_inspect_button.clicked.connect(
+            self._inspect_pc_pokemon_anchor
+        )
+        self.pc_storage_search_button = QPushButton("Search RAM for This Pokemon")
+        self.pc_storage_search_button.setToolTip(
+            "Use the last inspected Pokemon's PID and checksum to find matching records; "
+            "only matching records are returned."
+        )
+        self.pc_storage_search_button.clicked.connect(self._search_pc_pokemon_identity)
+        self.pc_storage_inspection_status_label = QLabel("idle")
+        self.pc_storage_inspection_status_label.setWordWrap(True)
+        self.pc_storage_inspection_reset_button = QPushButton(
+            "Reset Movement Baseline"
+        )
+        self.pc_storage_inspection_reset_button.setToolTip(
+            "Clear the saved Pokemon identity and address baseline; inspect the anchor again to recapture it."
+        )
+        self.pc_storage_inspection_reset_button.clicked.connect(
+            self._reset_pc_pokemon_inspection_baseline
+        )
+        pc_storage_anchor_toolbar.addStretch(1)
+        pc_storage_inspection_toolbar = QHBoxLayout()
+        pc_storage_inspection_toolbar.addWidget(self.pc_storage_inspect_button)
+        pc_storage_inspection_toolbar.addWidget(self.pc_storage_search_button)
+        pc_storage_inspection_toolbar.addWidget(
+            self.pc_storage_inspection_status_label, 1
+        )
+        pc_storage_inspection_toolbar.addWidget(
+            self.pc_storage_inspection_reset_button
+        )
+        self.pc_storage_details = QPlainTextEdit()
+        self.pc_storage_details.setReadOnly(True)
+        self.pc_storage_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.pc_storage_details.setPlaceholderText("Waiting for PC storage RAM payload.")
+        self.pc_storage_details.setMinimumHeight(110)
+        self.pc_storage_discovery_details = QPlainTextEdit()
+        self.pc_storage_discovery_details.setReadOnly(True)
+        self.pc_storage_discovery_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.pc_storage_discovery_details.setMinimumHeight(180)
+        self.pc_storage_discovery_details.setPlaceholderText(
+            "Click Discover PC Storage Address to run a one-shot Main RAM search."
+        )
+        self.pc_storage_discovery_details.setPlainText(self._last_pc_storage_discovery_text)
+        self.pc_save_offset_test_details = QPlainTextEdit()
+        self.pc_save_offset_test_details.setReadOnly(True)
+        self.pc_save_offset_test_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.pc_save_offset_test_details.setMinimumHeight(120)
+        self.pc_save_offset_test_details.setPlaceholderText(
+            "Capture once, move a boxed Pokemon without saving, then capture again."
+        )
+        self.pc_save_offset_test_details.setPlainText(
+            self._last_pc_save_offset_test_text
+        )
+        self.pc_sram_search_details = QPlainTextEdit()
+        self.pc_sram_search_details.setReadOnly(True)
+        self.pc_sram_search_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.pc_sram_search_details.setMinimumHeight(180)
+        self.pc_sram_search_details.setPlaceholderText(
+            "Live SRAM search results, matching records, neighboring slots, and movement between captures."
+        )
+        self.pc_sram_search_details.setPlainText(self._last_pc_sram_search_text)
+        pc_storage_discovery_pane = QWidget()
+        pc_storage_discovery_pane.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        pc_storage_discovery_layout = QVBoxLayout(pc_storage_discovery_pane)
+        pc_storage_discovery_layout.setContentsMargins(0, 0, 0, 0)
+        pc_storage_discovery_heading = QHBoxLayout()
+        pc_storage_discovery_heading.addWidget(QLabel("PC Storage Discovery"), 1)
+        self.pc_storage_discovery_expand_button = QPushButton("Expand")
+        self.pc_storage_discovery_expand_button.setObjectName(
+            "pcStorageDiscoveryExpandButton"
+        )
+        self.pc_storage_discovery_expand_button.setCheckable(True)
+        self.pc_storage_discovery_expand_button.setToolTip(
+            "Give the discovery results more vertical space; drag the divider to resize manually."
+        )
+        self.pc_storage_discovery_expand_button.toggled.connect(
+            self._set_pc_storage_discovery_expanded
+        )
+        pc_storage_discovery_heading.addWidget(
+            self.pc_storage_discovery_expand_button
+        )
+        pc_storage_discovery_layout.addLayout(pc_storage_discovery_heading)
+        pc_storage_discovery_layout.addWidget(self.pc_storage_discovery_details, 1)
+        self.pc_storage_panes_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.pc_storage_panes_splitter.setObjectName("pcStoragePanesSplitter")
+        self.pc_storage_panes_splitter.setChildrenCollapsible(False)
+        self.pc_storage_panes_splitter.setHandleWidth(8)
+        self.pc_storage_panes_splitter.addWidget(self.pc_storage_details)
+        self.pc_storage_panes_splitter.addWidget(pc_storage_discovery_pane)
+        self.pc_storage_panes_splitter.addWidget(self.pc_save_offset_test_details)
+        self.pc_storage_panes_splitter.addWidget(self.pc_sram_search_details)
+        self.pc_storage_panes_splitter.setStretchFactor(0, 1)
+        self.pc_storage_panes_splitter.setStretchFactor(1, 2)
+        self.pc_storage_panes_splitter.setStretchFactor(2, 1)
+        self.pc_storage_panes_splitter.setStretchFactor(3, 2)
+        self.pc_storage_panes_splitter.setSizes([1, 2, 1, 2])
+        pc_storage_content = QWidget(debug_page)
+        pc_storage_layout = QVBoxLayout(pc_storage_content)
+        pc_storage_layout.setContentsMargins(0, 0, 0, 0)
+        self.pc_storage_status_label = QLabel("Status: Connecting")
+        self.pc_storage_layout_label = QLabel("Box layout: Unresolved")
+        self.pc_storage_occupied_label = QLabel("Boxed Pokemon: --")
+        self.pc_storage_catch_status_label = QLabel("Monitoring new catches: No")
+        self.pc_storage_progress_label = QLabel("")
+        self.pc_storage_last_event_label = QLabel("Last PC event: No PC events yet.")
+        self.pc_storage_recovery_label = QLabel("")
+        for label in (
+            self.pc_storage_status_label, self.pc_storage_layout_label,
+            self.pc_storage_occupied_label, self.pc_storage_catch_status_label,
+            self.pc_storage_progress_label, self.pc_storage_last_event_label,
+            self.pc_storage_recovery_label,
+        ):
+            label.setWordWrap(True)
+            pc_storage_layout.addWidget(label)
+        normal_actions = QHBoxLayout()
+        normal_actions.addWidget(self.pc_discover_current_layout_button)
+        normal_actions.addStretch(1)
+        pc_storage_layout.addLayout(normal_actions)
+        self.pc_storage_anchor_recovery = QWidget(pc_storage_content)
+        recovery_layout = QVBoxLayout(self.pc_storage_anchor_recovery)
+        recovery_layout.setContentsMargins(0, 0, 0, 0)
+        recovery_layout.addLayout(pc_storage_session_toolbar)
+        pc_storage_layout.addWidget(self.pc_storage_anchor_recovery)
+        self.pc_storage_anchor_recovery.hide()
+
+        advanced_content = QWidget(pc_storage_content)
+        advanced_layout = QVBoxLayout(advanced_content)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        self.pc_storage_advanced_summary_label = QLabel("Resolver: --\nAcquisition: --\nDiscovery anchor: --")
+        self.pc_storage_advanced_summary_label.setWordWrap(True)
+        advanced_layout.addWidget(self.pc_storage_advanced_summary_label)
+        advanced_layout.addWidget(self.pc_storage_resolver_status_label)
+        advanced_layout.addWidget(self.pc_storage_resolver_address_label)
+        advanced_layout.addLayout(pc_storage_baseline_row)
+        advanced_layout.addWidget(self.pc_storage_baseline_message_label)
+        pc_storage_cache_row = QHBoxLayout()
+        pc_storage_cache_row.addWidget(self.pc_storage_cache_status_label, 1)
+        pc_storage_cache_row.addWidget(self.pc_storage_retry_cache_button)
+        advanced_layout.addLayout(pc_storage_cache_row)
+        legacy_content = QWidget(advanced_content)
+        legacy_layout = QVBoxLayout(legacy_content)
+        legacy_layout.setContentsMargins(0, 0, 0, 0)
+        legacy_layout.addWidget(self.pc_storage_summary_label)
+        legacy_layout.addLayout(pc_storage_toolbar)
+        legacy_layout.addLayout(pc_sram_search_toolbar)
+        legacy_layout.addLayout(pc_save_file_layout)
+        legacy_layout.addLayout(pc_save_test_toolbar)
+        legacy_layout.addLayout(pc_storage_anchor_toolbar)
+        legacy_layout.addLayout(pc_storage_inspection_toolbar)
+        self.pc_storage_legacy_section = CollapsibleSection(
+            "Legacy diagnostics", legacy_content, expanded=False
+        )
+        advanced_layout.addWidget(self.pc_storage_legacy_section)
+        self.pc_storage_raw_section = CollapsibleSection(
+            "Show raw debug output", self.pc_storage_panes_splitter, expanded=False
+        )
+        advanced_layout.addWidget(self.pc_storage_raw_section)
+        self.pc_storage_advanced_section = CollapsibleSection(
+            "Advanced Diagnostics", advanced_content, expanded=False
+        )
+        pc_storage_layout.addWidget(self.pc_storage_advanced_section)
+        self.pc_storage_section = CollapsibleSection(
+            "PC Storage", pc_storage_content, expanded=True
+        )
+        debug_layout.addWidget(self.pc_storage_section)
         self.ram_party_summary_label = QLabel("Party count: --")
         self.ram_party_details = QPlainTextEdit()
         self.ram_party_details.setReadOnly(True)
@@ -954,19 +1389,179 @@ class MainWindow(QMainWindow):
         party_state = snapshot.details.get("party_state")
         display_party_state = snapshot.details.get("display_party_state", party_state)
         party_payload = snapshot.details.get("party_payload")
+        pc_storage_payload = snapshot.details.get("pc_storage_payload")
+        pc_storage_discovery_payload = snapshot.details.get(
+            "pc_storage_discovery_payload", pc_storage_payload
+        )
+        pc_storage_discovery_progress = snapshot.details.get(
+            "pc_storage_discovery_progress", {"status": "idle"}
+        )
+        pc_save_offset_test_payload = snapshot.details.get(
+            "pc_save_offset_test_payload"
+        )
+        pc_save_offset_test_status = snapshot.details.get(
+            "pc_save_offset_test_status", {"status": "idle"}
+        )
+        pc_sram_search_payload = snapshot.details.get("pc_sram_search_payload")
+        pc_sram_search_status = snapshot.details.get(
+            "pc_sram_search_status", {"status": "idle"}
+        )
+        pc_storage_state = snapshot.details.get("pc_storage_state")
+        pc_storage_fresh = snapshot.details.get("pc_storage_payload_fresh", False)
+        pc_storage_stable_pokemon = snapshot.details.get("pc_storage_stable_pokemon", ())
+        pc_storage_changes = snapshot.details.get("pc_storage_changes", ())
+        pc_storage_monitor_debug = snapshot.details.get("pc_storage_monitor_debug")
         self._poll_coordinate_discovery(party_payload)
         battle_battlers = snapshot.details.get("battle_battlers", ())
         active_enemies = snapshot.details["active_enemy_battlers"]
         acquisition_run = self.nuzlocke_view.store.active_run
-        acquisition_candidates = tuple(
-            _acquisition_candidate(pokemon) for pokemon in getattr(party_state, "pokemon", ())
+        pc_storage_ready = (
+            snapshot.connected
+            and pc_storage_state is not None
+            and pc_storage_state.available
+            and pc_storage_fresh
         )
-        valid_acquisition_snapshot = _valid_acquisition_snapshot(party_state)
+        pc_payload_data = (
+            pc_storage_payload.payload
+            if pc_storage_payload is not None
+            and isinstance(pc_storage_payload.payload, dict)
+            else {}
+        )
+        party_payload_data = (
+            party_payload.payload
+            if party_payload is not None and isinstance(party_payload.payload, dict)
+            else {}
+        )
+        current_lua_run = party_payload_data.get("run_id") or pc_payload_data.get("lua_run_id")
+        self._maybe_auto_discover_pc_layout(
+            snapshot.connected, current_lua_run, pc_payload_data,
+            pc_storage_discovery_progress,
+        )
+        pc_storage_acquisition_ready = pc_storage_ready and (
+            pc_payload_data.get("pc_storage_resolver_kind") != "session_pc_cache"
+            or (
+                pc_payload_data.get("pc_storage_acquisition_enabled") is True
+                and pc_payload_data.get("lua_run_id", pc_payload_data.get("run_id"))
+                == current_lua_run
+                and self._pc_layout_requested_at is None
+                and not (
+                    pc_storage_discovery_progress.get("mode") == "session_layout"
+                    and pc_storage_discovery_progress.get("status") == "failed"
+                )
+            )
+        )
+        party_snapshot_valid = snapshot.connected and _valid_acquisition_snapshot(party_state)
+        party_acquisition_candidates = tuple(
+            _acquisition_candidate(pokemon)
+            for pokemon in getattr(party_state, "pokemon", ())
+        )
+        boxed_pokemon = pc_storage_stable_pokemon if pc_storage_ready else ()
+        self._refresh_pc_save_offset_test(
+            pc_save_offset_test_payload,
+            pc_save_offset_test_status,
+        )
+        self._refresh_pc_sram_search(
+            pc_sram_search_payload,
+            pc_sram_search_status,
+        )
+        boxed_acquisition_candidates = (
+            tuple(_boxed_acquisition_candidate(pokemon) for pokemon in boxed_pokemon)
+            if pc_storage_acquisition_ready
+            else ()
+        )
+        pc_pre_observer_trace = None
+        if pc_storage_changes:
+            for mon in pc_storage_changes:
+                candidate = next(
+                    (item for item in boxed_acquisition_candidates
+                     if item.stable_id == mon.stable_id),
+                    None,
+                )
+                inferred_location = None
+                if candidate is not None:
+                    _, _, location_id = classify_platinum_acquisition(
+                        candidate, acquisition_run
+                    )
+                    if acquisition_run is not None and location_id in acquisition_run.encounters:
+                        inferred_location = acquisition_run.encounters[location_id].location
+                LOGGER.info(
+                    "Stable BOX record frame=%s timestamp=%s id=%s box=%s slot=%s "
+                    "species=%s nickname=%s pid=0x%08X checksum=0x%04X level=%s "
+                    "AcquisitionCandidate(source_location='BOX')=%s inferred_location=%s",
+                    getattr(pc_storage_state, "scan_frame", None),
+                    datetime.now().astimezone().isoformat(timespec="seconds"),
+                    mon.stable_id,
+                    mon.box_index, mon.slot_index, mon.species_name, mon.decoded.nickname,
+                    mon.decoded.pid, mon.decoded.checksum, mon.decoded.met_level,
+                    candidate is not None, inferred_location or mon.met_location_name,
+                )
+                if not pc_storage_acquisition_ready:
+                    reason = (
+                        f"PC scan gate: connected={snapshot.connected}, "
+                        f"available={getattr(pc_storage_state, 'available', False)}, "
+                        f"fresh={pc_storage_fresh}, "
+                        "acquisition_enabled="
+                        f"{pc_payload_data.get('pc_storage_acquisition_enabled')}"
+                    )
+                    LOGGER.warning(
+                        "BOX candidate suppressed before observer: id=%s reason=%s",
+                        mon.stable_id, reason,
+                    )
+                    pc_pre_observer_trace = {
+                        "source": "BOX",
+                        "stable_id": mon.stable_id,
+                        "pokemon": mon.decoded.nickname or mon.species_name,
+                        "species": mon.species_name,
+                        "box": mon.box_index,
+                        "slot": mon.slot_index,
+                        "location": mon.met_location_name,
+                        "status": "suppressed",
+                        "reason": reason,
+                        "baseline_member": False,
+                        "already_observed": None,
+                        "timestamp": time.monotonic(),
+                    }
+        if pc_storage_acquisition_ready:
+            lua_run_id = (
+                pc_storage_payload.payload.get("run_id")
+                if pc_storage_payload is not None
+                else None
+            )
+            baseline_key = (
+                lua_run_id,
+                acquisition_run.run_id if acquisition_run else None,
+            )
+            if not self._pc_storage_tracking_active or baseline_key != self._pc_storage_baseline_key:
+                self._pc_acquisition_observer.baseline_candidates(
+                    boxed_acquisition_candidates,
+                    run=acquisition_run,
+                    store=self.nuzlocke_view.store,
+                )
+                self._pc_storage_baseline_ids = {
+                    candidate.stable_id for candidate in boxed_acquisition_candidates
+                }
+                self._pc_storage_post_baseline_ids.clear()
+                self._pc_storage_emitted_box_ids.clear()
+                self._pc_storage_tracking_active = True
+                self._pc_storage_baseline_key = baseline_key
+                LOGGER.info(
+                    "PC baseline established: Lua run=%s Nuzlocke run=%s occupied=%s ids=%s",
+                    lua_run_id, baseline_key[1], len(self._pc_storage_baseline_ids),
+                    sorted(self._pc_storage_baseline_ids),
+                )
+                self._pc_last_event = (
+                    f"Baseline established with {len(self._pc_storage_baseline_ids)} Pokemon."
+                )
+            self._pc_storage_post_baseline_ids.update(
+                candidate.stable_id for candidate in boxed_acquisition_candidates
+                if candidate.stable_id not in self._pc_storage_baseline_ids
+            )
+        new_acquisitions = ()
         try:
-            new_acquisitions = self._acquisition_observer.observe(
-                acquisition_candidates,
+            party_acquisitions = self._acquisition_observer.observe(
+                party_acquisition_candidates,
                 connected=snapshot.connected,
-                valid_snapshot=valid_acquisition_snapshot,
+                valid_snapshot=party_snapshot_valid,
                 run=acquisition_run,
                 store=self.nuzlocke_view.store,
                 classify=classify_platinum_acquisition,
@@ -974,11 +1569,122 @@ class MainWindow(QMainWindow):
                     candidate, run, first_party_member=True
                 ),
             )
+            boxed_acquisitions = self._pc_acquisition_observer.observe(
+                boxed_acquisition_candidates,
+                connected=snapshot.connected,
+                valid_snapshot=pc_storage_acquisition_ready,
+                run=acquisition_run,
+                store=self.nuzlocke_view.store,
+                classify=classify_platinum_acquisition,
+            )
+            new_acquisitions = (*party_acquisitions, *boxed_acquisitions)
+            self._pc_storage_emitted_box_ids.update(
+                event.stable_id for event in boxed_acquisitions
+            )
+            for event in boxed_acquisitions:
+                source_candidate = next(
+                    (item for item in boxed_acquisition_candidates
+                     if item.stable_id == event.stable_id), None
+                )
+                self._pc_last_event = (
+                    f"{event.nickname or event.species_name} appeared in "
+                    f"Box {source_candidate.box_index} Slot {source_candidate.slot_index} - "
+                    "BOX acquisition emitted."
+                    if source_candidate is not None
+                    else f"{event.nickname or event.species_name} - BOX acquisition emitted."
+                )
+                LOGGER.info(
+                    "BOX acquisition event emitted: id=%s species=%s nickname=%s level=%s "
+                    "location=%s frame=%s timestamp=%s status=pending",
+                    event.stable_id, event.species_name, event.nickname, event.met_level,
+                    event.suggested_location_name or event.met_location_name,
+                    getattr(pc_storage_state, "scan_frame", None), event.detected_at,
+                )
         except OSError:
             LOGGER.exception("Could not persist Nuzlocke acquisition observation")
-            new_acquisitions = ()
         if new_acquisitions:
             self.nuzlocke_view.refresh_acquisition_suggestions()
+        acquisition_trace = max(
+            (
+                trace for trace in (
+                    self._acquisition_observer.last_decision,
+                    self._pc_acquisition_observer.last_decision,
+                    pc_pre_observer_trace,
+                ) if trace is not None
+            ),
+            key=lambda trace: trace["timestamp"],
+            default=None,
+        )
+        if (
+            acquisition_trace is not None
+            and acquisition_trace["timestamp"] > self._last_acquisition_trace_timestamp
+        ):
+            self._last_acquisition_trace_timestamp = acquisition_trace["timestamp"]
+            self.nuzlocke_view.report_acquisition_trace(acquisition_trace)
+        self._pc_monitoring_ready = bool(
+            pc_storage_acquisition_ready
+            and pc_payload_data.get("pc_storage_resolver_kind") == "session_pc_cache"
+            and acquisition_run is not None
+            and self._pc_storage_tracking_active
+            and self._pc_storage_baseline_key == (
+                pc_payload_data.get("lua_run_id") or pc_payload_data.get("run_id"),
+                acquisition_run.run_id,
+            )
+        )
+        detection_sources = []
+        if party_snapshot_valid:
+            detection_sources.append("Party")
+        if self._pc_monitoring_ready:
+            detection_sources.append("Box")
+        self.nuzlocke_view.detection_sources_label.setText(
+            "Automatic encounter detection: "
+            + (" + ".join(detection_sources) if detection_sources else "Paused")
+        )
+        discovery_data = (
+            pc_storage_discovery_payload.payload
+            if pc_storage_discovery_payload is not None
+            and isinstance(pc_storage_discovery_payload.payload, dict)
+            else {}
+        )
+        discovery_status = discovery_data.get("pc_storage_resolver_status")
+        cache_progress_status = pc_storage_discovery_progress.get("status")
+        if self._pc_monitoring_ready:
+            self._pc_resolver_lifecycle = "baseline-ready"
+        elif cache_progress_status == "cache-pending":
+            self._pc_resolver_lifecycle = "cache-pending"
+        elif self._pc_layout_requested_at is not None:
+            self._pc_resolver_lifecycle = "discovering"
+        elif cache_progress_status == "failed" and discovery_status != "cache-confirmation-failed":
+            self._pc_resolver_lifecycle = "discovery-failed"
+        elif pc_payload_data.get("pc_storage_resolver_status") == "stale" or (
+            self._pc_storage_tracking_active and not pc_storage_ready
+        ):
+            self._pc_resolver_lifecycle = "stale"
+        elif discovery_status in {"stale", "cache-confirmation-failed"}:
+            self._pc_resolver_lifecycle = discovery_status
+        elif pc_payload_data.get("pc_storage_resolver_status") == "resolved for this session":
+            self._pc_resolver_lifecycle = "resolved-awaiting-baseline"
+        elif cache_progress_status == "cache-pending" or discovery_status == "cache-pending":
+            self._pc_resolver_lifecycle = "cache-pending"
+        else:
+            self._pc_resolver_lifecycle = "unresolved"
+        self._refresh_pc_storage_debug(
+            pc_storage_state,
+            pc_storage_payload,
+            pc_storage_fresh,
+            boxed_pokemon,
+            pc_storage_changes,
+            pc_storage_discovery_payload,
+            pc_storage_discovery_progress,
+            pc_storage_monitor_debug,
+            pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
+        )
+        self._refresh_pc_storage_compact_status(
+            snapshot.connected, pc_storage_state, pc_payload_data,
+            pc_storage_discovery_payload, pc_storage_discovery_progress,
+            pc_storage_monitor_debug,
+            pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
+        )
         payload_data = party_payload.payload if party_payload is not None else {}
         stale_after = getattr(
             getattr(self.ram_data_source, "server", None), "stale_after_seconds", 5.0
@@ -2004,6 +2710,2560 @@ class MainWindow(QMainWindow):
             lines.append("No occupied party slots reported.")
         text = "\n".join(lines)
         self._set_ram_party_debug_text(text)
+
+    def _set_pc_storage_discovery_expanded(self, expanded: bool) -> None:
+        if expanded:
+            current_sizes = self.pc_storage_panes_splitter.sizes()
+            if sum(current_sizes) > 0:
+                self._pc_storage_discovery_restore_sizes = current_sizes
+            self.pc_storage_panes_splitter.setSizes([1, 3, 1, 2])
+            self.pc_storage_discovery_expand_button.setText("Restore")
+            return
+
+        restore_sizes = getattr(self, "_pc_storage_discovery_restore_sizes", [1, 2, 1, 1])
+        self.pc_storage_panes_splitter.setSizes(restore_sizes)
+        self.pc_storage_discovery_expand_button.setText("Expand")
+
+    def _request_pc_storage_scan(self) -> None:
+        request = getattr(self.ram_data_source, "request_pc_storage_scan", None)
+        if not callable(request) or not request():
+            self.pc_storage_scan_status_label.setText(
+                "Request failed; confirm the updated Lua script is running."
+            )
+            return
+        self._pc_scan_requested_at = time.monotonic()
+        self.pc_storage_scan_status_label.setText("Scan requested; waiting for Lua response.")
+
+    def _request_pc_sram_pokemon_search(self) -> None:
+        request = getattr(self.ram_data_source, "request_pc_sram_pokemon_search", None)
+        if not callable(request):
+            self.pc_sram_search_status_label.setText(
+                "failed: live SRAM search transport is unavailable"
+            )
+            return
+        nickname = self.pc_layout_nickname_edit.text().strip()
+        species_id = self.pc_layout_species_combo.currentData()
+        if self._pc_sram_search_target is not None:
+            nickname, species_id = self._pc_sram_search_target
+        try:
+            dispatched = request(nickname, species_id)
+        except Exception as exc:
+            LOGGER.exception("Live SRAM Pokemon search dispatch failed.")
+            self.pc_sram_search_status_label.setText(
+                f"failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        if not dispatched:
+            server = getattr(self.ram_data_source, "server", None)
+            status_getter = getattr(server, "pc_sram_search_status", None)
+            status = status_getter() if callable(status_getter) else {}
+            error = status.get("error") if isinstance(status, dict) else None
+            self.pc_sram_search_status_label.setText(
+                f"failed: {error or 'BizHawk did not accept the SRAM search'}"
+            )
+            return
+        self._pc_sram_search_requested_at = time.monotonic()
+        if self._pc_sram_search_target is None:
+            self._pc_sram_search_target = (nickname, species_id)
+        self.pc_sram_search_button.setEnabled(False)
+        self.pc_sram_search_status_label.setText(
+            f"queued; target {nickname} / #{species_id}; reading SRAM incrementally"
+        )
+        LOGGER.info(
+            "Live SRAM Pokemon search dispatched from UI: nickname=%s species=%s",
+            nickname,
+            species_id,
+        )
+
+    def _reset_pc_sram_search_target(self) -> None:
+        self._pc_sram_search_target = None
+        self.pc_sram_search_status_label.setText("A/B target reset; next capture uses the selected species")
+
+    def _request_pc_save_offset_test(self) -> None:
+        request = getattr(self.ram_data_source, "request_pc_save_offset_test", None)
+        if not callable(request):
+            self.pc_save_offset_test_status_label.setText(
+                "failed: save-offset test transport is unavailable"
+            )
+            return
+        save_ram_directory = self.pc_save_offset_directory_edit.text().strip()
+        if not save_ram_directory:
+            self.pc_save_offset_test_status_label.setText(
+                "failed: select BizHawk's configured SaveRAM directory"
+            )
+            return
+        try:
+            dispatched = request(
+                save_ram_directory,
+                expected_nickname=self.pc_layout_nickname_edit.text().strip() or None,
+                expected_species_id=self.pc_layout_species_combo.currentData(),
+            )
+        except Exception as exc:
+            LOGGER.exception("Save-file PC offset test dispatch failed.")
+            self.pc_save_offset_test_status_label.setText(
+                f"failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        if not dispatched:
+            server = getattr(self.ram_data_source, "server", None)
+            status_getter = getattr(server, "pc_save_offset_test_status", None)
+            dispatch_status = status_getter() if callable(status_getter) else {}
+            error = dispatch_status.get("error") if isinstance(dispatch_status, dict) else None
+            self.pc_save_offset_test_status_label.setText(
+                f"failed: {error or 'BizHawk did not accept the test command'}"
+            )
+            return
+        self._pc_save_offset_test_requested_at = time.monotonic()
+        self.pc_save_offset_test_button.setEnabled(False)
+        self.pc_save_offset_test_status_label.setText(
+            "queued; waiting for SaveRAM flush and file read"
+        )
+        LOGGER.info("Save-file PC offset test command dispatched from the UI.")
+
+    @staticmethod
+    def _default_bizhawk_save_ram_directory() -> str:
+        configured = os.environ.get("BIZHAWK_SAVE_RAM_DIR")
+        candidates = [
+            Path(configured).expanduser() if configured else None,
+            Path.home() / "Downloads" / "BizHawk-2.11.1-win-x64" / "NDS" / "SaveRAM",
+        ]
+        for candidate in candidates:
+            if candidate is not None and candidate.is_dir():
+                return str(candidate)
+        return ""
+
+    def _browse_pc_save_offset_directory(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select BizHawk's NDS SaveRAM directory",
+            self.pc_save_offset_directory_edit.text().strip(),
+        )
+        if directory:
+            self.pc_save_offset_directory_edit.setText(directory)
+
+    def _refresh_pc_save_offset_test(self, payload, status) -> None:
+        status = status if isinstance(status, dict) else {"status": "idle"}
+        state = str(status.get("status", "idle"))
+        if state == "scanning":
+            received = int(status.get("bytes_received") or 0)
+            total = int(status.get("total_bytes") or 0)
+            percent = min(100, received * 100 // max(1, total)) if total else 0
+            chunks = status.get("chunks_received")
+            chunk_count = status.get("chunk_count")
+            chunk_text = (
+                f"; chunks {chunks}/{chunk_count}"
+                if chunks is not None and chunk_count is not None
+                else ""
+            )
+            self.pc_save_offset_test_status_label.setText(
+                f"scanning {percent}% ({received:,}/{total:,} bytes){chunk_text}"
+            )
+            self.pc_save_offset_test_button.setEnabled(False)
+        elif state == "queued":
+            self.pc_save_offset_test_status_label.setText(
+                "queued; waiting for SaveRAM flush and file read"
+            )
+            self.pc_save_offset_test_button.setEnabled(False)
+        elif state == "failed":
+            self.pc_save_offset_test_status_label.setText(
+                f"failed: {status.get('error') or 'capture failed'}"
+            )
+            self.pc_save_offset_test_button.setEnabled(True)
+        elif state == "completed":
+            self.pc_save_offset_test_status_label.setText("completed")
+            self.pc_save_offset_test_button.setEnabled(True)
+        else:
+            self.pc_save_offset_test_status_label.setText("idle")
+            self.pc_save_offset_test_button.setEnabled(True)
+
+        if (
+            self._pc_save_offset_test_requested_at is not None
+            and state in {"queued", "scanning"}
+            and time.monotonic() - self._pc_save_offset_test_requested_at > 45.0
+        ):
+            self.pc_save_offset_test_status_label.setText(
+                "failed: no complete save-offset response after 45s"
+            )
+            self.pc_save_offset_test_button.setEnabled(True)
+            self._pc_save_offset_test_requested_at = None
+
+        result = getattr(payload, "payload", None)
+        if not isinstance(result, dict):
+            return
+        result_key = (
+            result.get("test_id"),
+            result.get("capture_number"),
+            result.get("error"),
+        )
+        if result_key == self._last_pc_save_offset_test_key:
+            return
+        self._last_pc_save_offset_test_key = result_key
+        self._pc_save_offset_test_requested_at = None
+        self._last_pc_save_offset_test_text = self._pc_save_offset_test_text(result)
+        self.pc_save_offset_test_details.setPlainText(
+            self._last_pc_save_offset_test_text
+        )
+
+    def _refresh_pc_sram_search(self, payload, status) -> None:
+        status = status if isinstance(status, dict) else {"status": "idle"}
+        state = str(status.get("status", "idle"))
+        if state in {"scanning", "analyzing"}:
+            received = int(status.get("bytes_received") or 0)
+            total = int(status.get("total_bytes") or 0)
+            percent = int(status.get("progress_percent") or 0)
+            chunks = status.get("chunks_received")
+            chunk_count = status.get("chunk_count")
+            chunk_text = (
+                f"; chunks {chunks}/{chunk_count}"
+                if chunks is not None and chunk_count is not None
+                else ""
+            )
+            phase = "analyzing records" if state == "analyzing" else "scanning"
+            self.pc_sram_search_status_label.setText(
+                f"{phase} {percent}% ({received:,}/{total:,} bytes){chunk_text}"
+            )
+            self.pc_sram_search_button.setEnabled(False)
+        elif state == "queued":
+            self.pc_sram_search_status_label.setText(
+                "queued; waiting for Lua to start the SRAM scan"
+            )
+            self.pc_sram_search_button.setEnabled(False)
+        elif state == "failed":
+            self.pc_sram_search_status_label.setText(
+                f"failed: {status.get('error') or 'SRAM search failed'}"
+            )
+            self.pc_sram_search_button.setEnabled(True)
+        elif state == "completed":
+            count = status.get("target_match_count", 0)
+            capture = status.get("capture_number", "--")
+            self.pc_sram_search_status_label.setText(
+                f"completed; capture {capture}; target matches {count}"
+            )
+            self.pc_sram_search_button.setEnabled(True)
+        else:
+            self.pc_sram_search_status_label.setText("idle")
+            self.pc_sram_search_button.setEnabled(True)
+
+        if (
+            self._pc_sram_search_requested_at is not None
+            and state in {"queued", "scanning", "analyzing"}
+            and time.monotonic() - self._pc_sram_search_requested_at > 55.0
+        ):
+            self.pc_sram_search_status_label.setText(
+                "failed: no complete live SRAM response after 55s"
+            )
+            self.pc_sram_search_button.setEnabled(True)
+            self._pc_sram_search_requested_at = None
+
+        result = getattr(payload, "payload", None)
+        if not isinstance(result, dict):
+            return
+        result_key = (
+            result.get("scan_id"),
+            result.get("capture_number"),
+            result.get("error"),
+            result.get("sha256"),
+        )
+        if result_key == self._last_pc_sram_search_key:
+            return
+        self._last_pc_sram_search_key = result_key
+        self._pc_sram_search_requested_at = None
+        self._last_pc_sram_search_text = self._pc_sram_search_text(result)
+        self.pc_sram_search_details.setPlainText(self._last_pc_sram_search_text)
+
+    @staticmethod
+    def _pc_sram_search_text(result: dict) -> str:
+        domain_size = result.get("domain_size")
+        if not isinstance(domain_size, int):
+            domain_size = 0
+        lines = [
+            "Live SRAM Box Pokemon Search",
+            f"Capture: {result.get('capture_number', '--')} / scan {result.get('scan_id', '--')}",
+            f"Lua: {result.get('lua_build_id', '--')} / run {result.get('lua_run_id', '--')}",
+            f"Source: {result.get('source', '--')}",
+            f"SRAM domain: {result.get('domain', '--')} ({domain_size:,} bytes)",
+            (
+                "Fixed-offset candidates fitting this domain (not validated): "
+                f"{result.get('eligible_save_copy_count', '--')}"
+            ),
+        ]
+        if result.get("error"):
+            lines.extend((f"FAILED: {result['error']}", ""))
+            return "\n".join(lines)
+        identity = result.get("expected_identity") or {}
+        domains = result.get("available_domains")
+        if isinstance(domains, list):
+            lines.append("BizHawk memory domains:")
+            for item in domains:
+                if isinstance(item, dict):
+                    size = item.get("size")
+                    size_text = f"0x{size:X}" if isinstance(size, int) else "unknown size"
+                    lines.append(
+                        f"  {item.get('name', '--')}: {size_text}; "
+                        f"readable={item.get('readable', False)}; "
+                        f"save-like={item.get('save_like', False)}; "
+                        f"offset candidates fit={item.get('eligible_save_copy_count', 0)} (not validated)"
+                    )
+        lines.extend(
+            (
+                f"Target: {identity.get('nickname', '--')} / species #{identity.get('species_id', '--')}",
+                f"Snapshot SHA-256: {result.get('sha256', '--')}",
+                "Checksum-valid target offsets: "
+                + (", ".join(result.get("target_match_offsets", [])) or "none"),
+                "Matching-copy spacing: "
+                + (
+                    ", ".join(
+                        f"{item.get('from')} -> {item.get('to')} (+0x{item.get('delta', 0):X})"
+                        for item in result.get("target_match_copy_deltas", [])
+                    )
+                    or "single copy or no matches"
+                ),
+                (
+                    "Candidates: "
+                    f"{result.get('candidate_records_examined', 0):,} 4-byte-aligned starts; "
+                    f"{result.get('checksum_valid_record_count', 0)} checksum-valid records"
+                ),
+                f"Target matches: {result.get('target_match_count', 0)}",
+                f"Layout strongly validated: {str(result.get('layout_strongly_validated', False)).lower()}",
+                f"Conclusion: {result.get('conclusion', '--')}",
+                "",
+            )
+        )
+        matches = result.get("target_matches")
+        if not isinstance(matches, list) or not matches:
+            lines.append("No checksum-valid target match was found.")
+        else:
+            for index, match in enumerate(matches, 1):
+                lines.extend(
+                    (
+                        (
+                            f"Match {index}: {match.get('nickname')} / {match.get('species_name')} "
+                            f"(#{match.get('species_id')}) at SRAM {match.get('offset_hex')}"
+                        ),
+                        f"  PID={match.get('pid')} checksum={match.get('checksum')} valid={match.get('checksum_valid')}",
+                        "  Nearby raw bytes:",
+                    )
+                )
+                surrounding = match.get("surrounding_bytes") or {}
+                raw_hex = str(surrounding.get("hex") or "")
+                for position in range(0, len(raw_hex), 32):
+                    lines.append(f"    {raw_hex[position : position + 32]}")
+                lines.append("  0x88 stride neighbors (-4 through +8 records):")
+                for neighbor in match.get("stride_neighbors", []):
+                    lines.append(
+                        "    "
+                        f"{neighbor.get('slot_delta', 0):+d} ({neighbor.get('delta', 0):+d}) "
+                        f"{neighbor.get('offset_hex')}: {neighbor.get('classification')}"
+                        + (
+                            f" {neighbor.get('nickname')} / {neighbor.get('species_name')} "
+                            f"(#{neighbor.get('species_id')})"
+                            if neighbor.get("nickname")
+                            else ""
+                        )
+                    )
+                lines.append("  Nearby checksum-valid records:")
+                nearby = match.get("nearby_records") or []
+                if not nearby:
+                    lines.append("    none within 0x10000 bytes")
+                for record in nearby:
+                    lines.append(
+                        f"    {record.get('offset_hex')} delta={record.get('delta'):+d}: "
+                        f"{record.get('nickname')} / {record.get('species_name')} "
+                        f"(#{record.get('species_id')}) "
+                        f"PID={record.get('pid')} checksum={record.get('checksum')}"
+                    )
+                stride_walk = match.get("stride_walk") or {}
+                lines.append("  0x88 stride walk (up to 540 records each direction):")
+                for direction in ("backward", "forward"):
+                    direction_data = stride_walk.get(direction, {})
+                    lines.append(
+                        f"    {direction}: occupied={direction_data.get('occupied', 0)} "
+                        f"empty={direction_data.get('empty', 0)} "
+                        f"malformed={direction_data.get('malformed', 0)} "
+                        f"out-of-range={direction_data.get('out_of_range', 0)} "
+                        f"first malformed step={direction_data.get('first_malformed_slot_delta', '--')}"
+                    )
+                    for record in direction_data.get("occupied_records", []):
+                        lines.append(
+                            f"      {record.get('slot_delta'):+d} {record.get('offset_hex')}: "
+                            f"{record.get('nickname')} / {record.get('species_name')} "
+                            f"(#{record.get('species_id')}) checksum={record.get('checksum')}"
+                        )
+                layout = match.get("layout_as_box_1_slot_1") or {}
+                lines.extend(
+                    (
+                        "  540-slot layout assuming this is Box 1 Slot 1:",
+                        (
+                            f"    first record={layout.get('first_record_offset_hex', '--')} "
+                            f"valid={layout.get('valid_occupied_count', 0)} "
+                            f"empty={layout.get('empty_count', 0)} invalid={layout.get('invalid_count', 0)} "
+                            f"fits={layout.get('region_fits_domain', False)} "
+                            f"plausible={layout.get('plausible', False)}"
+                        ),
+                    )
+                )
+                for record in layout.get("occupied_records", []):
+                    lines.append(
+                        f"    Box {record.get('box')} Slot {record.get('slot')}: "
+                        f"{record.get('nickname')} / {record.get('species_name')} "
+                        f"(#{record.get('species_id')}) "
+                        f"{record.get('offset_hex')} checksum valid"
+                    )
+                lines.append("")
+
+        comparison = result.get("previous_capture") or {}
+        if comparison.get("available"):
+            lines.extend(
+                (
+                    "Capture-to-capture comparison (no in-game save command invoked):",
+                    (
+                        f"  changed bytes={comparison.get('changed_byte_count', 0)} "
+                        f"ranges={comparison.get('changed_range_count', 0)}"
+                    ),
+                    f"  old target offsets: {', '.join(comparison.get('old_target_offsets', [])) or 'none'}",
+                    f"  new target offsets: {', '.join(comparison.get('new_target_offsets', [])) or 'none'}",
+                )
+            )
+            if comparison.get("unmatched_old_target_offsets"):
+                lines.append(
+                    "  No current match paired with previous offsets: "
+                    + ", ".join(comparison["unmatched_old_target_offsets"])
+                )
+            if comparison.get("unmatched_new_target_offsets"):
+                lines.append(
+                    "  New matches without a previous offset: "
+                    + ", ".join(comparison["unmatched_new_target_offsets"])
+                )
+            for pair in comparison.get("movement_pairs", []):
+                marker = "  <== +0x88 slot forward" if pair.get("one_box_slot_forward") else ""
+                lines.append(
+                    f"  moved {pair.get('old_offset')} -> {pair.get('new_offset')}: "
+                    f"delta {pair.get('delta_hex')}; "
+                    f"checksum valid {pair.get('old_checksum_valid', '--')} -> "
+                    f"{pair.get('new_checksum_valid', '--')}; "
+                    f"PID {pair.get('old_pid', '--')} -> {pair.get('new_pid', '--')}"
+                    f"{marker}"
+                )
+                if pair.get("inferred_first_record_offset") is not None:
+                    lines.append(
+                        "    Assuming Capture A was Box 1 Slot 1: "
+                        f"array start=0x{pair['inferred_first_record_offset']:05X}; "
+                        f"current target=Box {pair.get('inferred_box')} "
+                        f"Slot {pair.get('inferred_slot')}"
+                    )
+            lines.append("  Changed SRAM ranges:")
+            for changed in comparison.get("changed_ranges", []):
+                lines.append(
+                    f"    {changed.get('start_offset')}..{changed.get('end_offset')} "
+                    f"({changed.get('byte_count')} bytes)"
+                )
+            if comparison.get("changed_ranges_truncated"):
+                lines.append("    Additional changed ranges omitted from display.")
+        else:
+            lines.extend(
+                (
+                    "Capture baseline: saved for this Lua run and SRAM domain.",
+                    "Move the Pokemon without using the in-game Save command, then run this search again.",
+                )
+            )
+            if comparison.get("reason"):
+                lines.append(f"  {comparison['reason']}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _pc_save_offset_test_text(result: dict) -> str:
+        lines = [
+            "Save-File PC Offset Test",
+            f"Capture: {result.get('capture_number', '--')} / test {result.get('test_id', '--')}",
+            (
+                "Lua: "
+                f"{result.get('lua_build_id', '--')} / "
+                f"{result.get('lua_game_id', '--')} / "
+                f"{result.get('lua_game_version', '--')}"
+            ),
+            f"Script: {result.get('lua_script_source', '--')}",
+            f"Lua run: {result.get('lua_run_id', '--')}",
+            f"ROM name/hash: {result.get('lua_rom_name', '--')} / {result.get('lua_rom_hash', '--')}",
+            f"System ID: {result.get('lua_system_id', '--')}",
+            f"Loaded ROM path: {result.get('lua_rom_path') or 'not exposed by this BizHawk Lua API'}",
+            f"ROM path API: {result.get('lua_rom_path_api', 'not exposed')}",
+            f"Configured SaveRAM path: {result.get('lua_configured_save_ram_path') or 'not exposed by client.getconfig()'}",
+            (
+                "SaveRAM API: client.saveram() "
+                f"available={str(result.get('save_ram_api_available', False)).lower()}; "
+                f"flush call ok={str(result.get('save_ram_flush_call_ok', False)).lower()}"
+            ),
+            f"SaveRAM directory: {result.get('save_ram_directory', '--')}",
+            f"Active SaveRAM candidate: {result.get('save_ram_file_path', '--')}",
+            f"Detection reason: {result.get('save_ram_detection_reason', '--')}",
+            f"Save filename stem: {result.get('save_ram_filename_stem', '--')}",
+            f"Flush semantics: {result.get('save_ram_flush_semantics', '--')}",
+            "Diagnostic only; PC acquisition and the production reader are unchanged.",
+            "",
+            "BizHawk memory domains:",
+        ]
+        for domain in result.get("domains", ()):
+            if not isinstance(domain, dict):
+                continue
+            size = domain.get("size")
+            size_text = f"0x{size:X}" if isinstance(size, int) else "unknown size"
+            lines.append(
+                f"  {domain.get('name', '--')}: {size_text}; "
+                f"readable={str(domain.get('readable', False)).lower()}; "
+                f"save-like={str(domain.get('save_like', False)).lower()}; "
+                f"eligible copies={domain.get('eligible_copy_count', 0)}"
+            )
+        changed_files = result.get("save_ram_file_changes", ())
+        lines.extend(("", "Files changed by the flush:"))
+        if not changed_files:
+            lines.append("  None detected.")
+        for item in changed_files:
+            if isinstance(item, dict):
+                after = item.get("after") or {}
+                lines.append(
+                    f"  {item.get('filename', '--')}: {item.get('reason', '--')}; "
+                    f"size={after.get('size', '--')}; "
+                    f"modified={after.get('modified_timestamp', '--')}"
+                )
+        before_files = result.get("save_ram_directory_before", ())
+        after_files = result.get("save_ram_directory_after", ())
+        lines.append(
+            f"Directory metadata captured: before={len(before_files)} files; "
+            f"after={len(after_files)} files."
+        )
+        for label, entries in (("Before flush", before_files), ("After flush", after_files)):
+            lines.append(f"  {label} file metadata:")
+            for item in entries:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"    {item.get('filename', '--')}: size={item.get('size', '--')}; "
+                        f"modified={item.get('modified_timestamp', '--')}"
+                    )
+        if result.get("error"):
+            lines.extend(("", f"FAILED: {result['error']}"))
+            return "\n".join(lines)
+
+        search = result.get("save_ram_identity_search", {})
+        if isinstance(search, dict):
+            identity = search.get("identity") or {}
+            lines.extend((
+                "",
+                "Full SaveRAM identity search:",
+                f"  Target: {identity.get('nickname', '--')} / species #{identity.get('species_id', '--')}",
+                (
+                    f"  Searched {search.get('searched_bytes', 0):,} bytes at "
+                    f"{search.get('alignment_bytes', 4)}-byte alignment; "
+                    f"checksum-valid matches={search.get('match_count', 0)}"
+                ),
+            ))
+            for match in search.get("matches", ()):
+                lines.append(
+                    f"  {match.get('offset_hex', '--')}: {match.get('nickname', '--')} / "
+                    f"{match.get('species', '--')} (#{match.get('species_id', '--')}); "
+                    f"checksum={match.get('checksum_valid', False)}"
+                )
+                positions = match.get("layout_positions", ())
+                if positions:
+                    lines.append(
+                        "    Layout position(s): "
+                        + "; ".join(
+                            f"{item.get('interpretation')} at copy "
+                            f"{item.get('copy_offset')} -> Box {item.get('box')} "
+                            f"Slot {item.get('slot')}"
+                            for item in positions
+                        )
+                    )
+            if not search.get("matches"):
+                lines.append("  No checksum-valid target Pokemon was found in the file.")
+            file_comparison = search.get("file_comparison", {})
+            if isinstance(file_comparison, dict) and file_comparison.get("has_previous_capture"):
+                lines.append(
+                    f"  Capture comparison: changed={file_comparison.get('changed')}; "
+                    f"changed bytes={file_comparison.get('changed_byte_count')}; "
+                    f"changed ranges={file_comparison.get('changed_range_count', 0)}"
+                )
+                lines.append(
+                    "  Mitsu offsets: "
+                    f"before={', '.join(file_comparison.get('old_matching_offsets', [])) or 'not found'}; "
+                    f"after={', '.join(file_comparison.get('new_matching_offsets', [])) or 'not found'}"
+                )
+                for movement in file_comparison.get("movement_candidates", ()):
+                    lines.append(
+                        f"  Movement: {movement.get('old_offset_hex')} -> "
+                        f"{movement.get('new_offset_hex')} ({movement.get('delta_hex')} bytes); "
+                        f"checksum valid before/after={movement.get('checksum_valid_before')}/"
+                        f"{movement.get('checksum_valid_after')}"
+                    )
+                for changed in file_comparison.get("changed_ranges", ()):
+                    lines.append(
+                        f"    Changed bytes {changed.get('start')}.."
+                        f"{changed.get('end_exclusive')} ({changed.get('length')} bytes)"
+                    )
+
+        expected = result.get("expected", {})
+        lines.extend((
+            "",
+            "Layout: 18 boxes x 30 slots x 136 bytes; 540 total records.",
+            "Both interpretations are tested: fixed offset as first record (header at -4), and fixed offset as PCBoxes header (records at +4).",
+            "",
+            "Save-copy candidates:",
+        ))
+        candidates = result.get("candidates", ())
+        if not candidates:
+            lines.append("  No eligible save-domain copy was captured.")
+        for candidate in candidates:
+            lines.extend((
+                "",
+                (
+                    f"{candidate.get('layout_interpretation', '--')}: "
+                    f"{candidate.get('domain', '--')} fixed offset "
+                    f"{candidate.get('save_copy_offset_tested', '--')}; "
+                    f"first record {candidate.get('first_record_offset', '--')}; "
+                    f"header {candidate.get('header_offset', '--')}:"
+                ),
+                (
+                    f"  Domain size: {candidate.get('domain_size', '--')}; "
+                    f"region fits: {str(candidate.get('record_region_fits_domain', False)).lower()}"
+                ),
+                f"  PC structure validates: {str(candidate.get('structure_valid', False)).lower()}",
+                (
+                    f"  Current box: {candidate.get('header_current_box', '--')} "
+                    f"(valid={str(candidate.get('header_valid', False)).lower()})"
+                ),
+                f"  Box 1 Slot 1: {MainWindow._format_save_pc_slot(candidate.get('box_1_slot_1'))}",
+                f"  Box 1 Slot 2: {MainWindow._format_save_pc_slot(candidate.get('box_1_slot_2'))}",
+                (
+                    f"  Expected Box 1 Slot 1 identity match: "
+                    f"{str(candidate['expected_identity_match']).lower()}"
+                    if "expected_identity_match" in candidate
+                    else ""
+                ),
+                (
+                    f"  Occupied: {candidate.get('occupied_count', 0)}; "
+                    f"checksum-valid: {candidate.get('checksum_valid_count', 0)}; "
+                    f"empty: {candidate.get('empty_count', 0)}; "
+                    f"malformed: {candidate.get('invalid_count', 0)}"
+                ),
+            ))
+            for pokemon in candidate.get("occupied_records", ()):
+                lines.append(
+                    f"    Box {pokemon['box']} Slot {pokemon['slot']}: "
+                    f"{pokemon['nickname'] or '(no nickname)'} / "
+                    f"{pokemon['species']} (#{pokemon['species_id']}) "
+                    f"checksum={'VALID' if pokemon['checksum_valid'] else 'INVALID'}"
+                )
+            invalid_records = candidate.get("invalid_records", ())
+            if invalid_records:
+                lines.append(
+                    "    Malformed slot examples: "
+                    + ", ".join(
+                        f"Box {item['box']} Slot {item['slot']}"
+                        for item in invalid_records[:8]
+                    )
+                )
+
+        comparison = result.get("comparison")
+        if isinstance(comparison, dict):
+            lines.extend(("", "Comparison with previous manual capture:"))
+            if not comparison.get("has_previous_capture"):
+                lines.append("  This is the baseline capture; click again after moving a Pokemon without saving.")
+            for item in comparison.get("targets", ()):
+                lines.append(
+                    f"  {item.get('domain')} at {item.get('record_offset')}: "
+                    f"{item.get('status')}; changed bytes={item.get('changed_byte_count', '--')}; "
+                    f"changed slots={item.get('changed_slot_count', 0)}"
+                )
+                for slot in item.get("changed_slots", ())[:12]:
+                    lines.append(f"    Box {slot['box']} Slot {slot['slot']} changed")
+            if comparison.get("unchanged_note"):
+                lines.append(f"  {comparison['unchanged_note']}")
+        lines.append(
+            f"Bytes captured from the two PC regions: {result.get('bytes_received', 0):,}; "
+            f"fixed offsets tested: {', '.join(expected.get('record_offsets', ())) or '--'}"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_save_pc_slot(slot) -> str:
+        if not isinstance(slot, dict) or slot.get("empty"):
+            return "empty"
+        nickname = slot.get("nickname") or "(no nickname)"
+        species = slot.get("species", f"Unknown #{slot.get('species_id', '?')}")
+        return (
+            f"{nickname} / {species} (#{slot.get('species_id', '?')}), "
+            f"checksum={'VALID' if slot.get('checksum_valid') else 'INVALID'}"
+        )
+
+    def _request_pc_storage_discovery(self) -> None:
+        request = getattr(self.ram_data_source, "request_pc_storage_discovery", None)
+        if not callable(request) or not request():
+            self.pc_storage_discovery_status_label.setText("failed")
+            return
+        self._pc_discovery_requested_at = time.monotonic()
+        self.pc_storage_discovery_status_label.setText("scanning...")
+        self.pc_storage_discovery_cancel_button.setEnabled(True)
+
+    def _reset_pc_baseline(self) -> None:
+        self._pc_storage_tracking_active = False
+        self._pc_storage_baseline_key = None
+        self._pc_storage_baseline_ids.clear()
+        self._pc_storage_post_baseline_ids.clear()
+        self._pc_storage_emitted_box_ids.clear()
+        self._pc_monitoring_ready = False
+        self._pc_acquisition_observer = PartyAcquisitionObserver(reset_on_disconnect=False)
+
+    def _maybe_auto_discover_pc_layout(
+        self, connected: bool, lua_run_id, pc_payload: dict, progress: dict,
+    ) -> None:
+        if not connected or not isinstance(lua_run_id, str) or not lua_run_id:
+            return
+        pc_supported = (
+            pc_payload.get("pc_storage_resolver_kind") == "session_pc_cache"
+            and isinstance(pc_payload.get("pc_storage_reader_version"), int)
+            and pc_payload["pc_storage_reader_version"] >= 4
+        )
+        if not pc_supported and self._pc_lua_run_id is None:
+            return
+        previous_run = self._pc_lua_run_id
+        if lua_run_id != previous_run:
+            self._pc_lua_run_id = lua_run_id
+            self._reset_pc_baseline()
+            self._pc_layout_requested_at = None
+            self._pc_auto_rediscovery_key = None
+            if previous_run is not None:
+                reset = getattr(self.ram_data_source, "reset_pc_discovery_for_lua_run", None)
+                if callable(reset):
+                    reset(lua_run_id)
+                self._pc_last_event = "Lua session changed - rediscovering PC layout."
+        if not pc_supported or pc_payload.get(
+            "lua_run_id", pc_payload.get("run_id")
+        ) != lua_run_id:
+            return
+        if progress.get("status") == "failed" and progress.get("lua_run_id") in {
+            None, lua_run_id,
+        }:
+            self._pc_layout_requested_at = None
+        cache_valid = (
+            pc_payload.get("pc_storage_resolver_status") == "resolved for this session"
+            and pc_payload.get("session_pc_run_id") == lua_run_id
+            and pc_payload.get("pc_storage_acquisition_enabled") is True
+            and not (
+                progress.get("mode") == "session_layout"
+                and progress.get("status") == "failed"
+            )
+        )
+        if cache_valid:
+            self._pc_auto_rediscovery_key = None
+            if progress.get("status") == "completed":
+                self._pc_layout_requested_at = None
+            return
+        stale = (
+            pc_payload.get("pc_storage_rediscovery_required") is True
+            or pc_payload.get("pc_storage_resolver_status") == "stale"
+        )
+        if stale:
+            stale_key = (lua_run_id, pc_payload.get("session_pc_first_record_address"))
+            if stale_key == self._pc_auto_rediscovery_key:
+                return
+            self._pc_auto_rediscovery_key = stale_key
+            self._pc_last_event = "PC layout became stale - rediscovering."
+            self._reset_pc_baseline()
+            self._discover_current_pc_layout()
+            return
+        if lua_run_id in self._pc_auto_discovery_requested_runs:
+            return
+        if progress.get("status") == "failed" and previous_run in {None, lua_run_id}:
+            return
+        if progress.get("status") in {
+            "queued", "scanning", "stalled", "retrying", "analyzing", "cache-pending",
+        }:
+            return
+        self._pc_auto_discovery_requested_runs.add(lua_run_id)
+        self._discover_current_pc_layout()
+
+    def _rediscover_pc_layout(self) -> None:
+        if self._discover_current_pc_layout():
+            self._reset_pc_baseline()
+            if self._pc_lua_run_id:
+                self._pc_auto_discovery_requested_runs.add(self._pc_lua_run_id)
+            self._pc_last_event = "PC layout rediscovery requested."
+
+    def _refresh_pc_storage_compact_status(
+        self, connected, state, pc_payload, discovery_payload, progress,
+        monitor_debug, acquisition_trace,
+    ) -> None:
+        discovery = getattr(discovery_payload, "payload", {})
+        if not isinstance(discovery, dict):
+            discovery = {}
+        if not isinstance(progress, dict):
+            progress = {}
+        discovery_summary = discovery.get("pc_storage_discovery_summary") or {}
+        failure = progress.get("status") == "failed" or self._pc_resolver_lifecycle in {
+            "cache-confirmation-failed", "discovery-failed",
+        }
+        anchor_failure = (
+            failure and discovery.get("pc_storage_session_layout_result") is True
+            and discovery.get("pc_storage_resolver_status") == "unresolved"
+        )
+        self.pc_storage_anchor_recovery.setVisible(anchor_failure)
+        if anchor_failure:
+            no_matches = discovery_summary.get("matching_box1_slot1_records_found") == 0
+            self.pc_storage_recovery_label.setText(
+                "PC layout could not be identified. Box 1 Slot 1 may be empty. "
+                "What Pokemon is currently in Box 1 Slot 1?"
+                if no_matches and discovery_summary.get("candidate_records_found") == 0
+                else "PC layout could not be identified. What Pokemon is currently in Box 1 Slot 1?"
+            )
+        elif failure:
+            self.pc_storage_recovery_label.setText(
+                "PC layout could not be resolved. Monitoring new boxed catches is paused."
+            )
+        else:
+            self.pc_storage_recovery_label.setText("")
+        if not connected or not pc_payload:
+            status = "Connecting"
+        elif self._pc_monitoring_ready:
+            status = "Monitoring"
+        elif self._pc_resolver_lifecycle == "cache-pending":
+            status = "Validating PC layout"
+        elif self._pc_resolver_lifecycle == "resolved-awaiting-baseline":
+            status = "Establishing baseline"
+        elif self._pc_resolver_lifecycle == "discovering":
+            status = "Discovering PC layout"
+        elif failure:
+            status = "Monitoring paused"
+        elif self._pc_resolver_lifecycle == "stale":
+            status = "Rediscovery required"
+        else:
+            status = "Monitoring paused"
+        self.pc_storage_status_label.setText(f"Status: {status}")
+        self.pc_discover_current_layout_button.setEnabled(
+            status not in {"Discovering PC layout", "Validating PC layout"}
+        )
+        layout_resolved = (
+            pc_payload.get("pc_storage_resolver_status") == "resolved for this session"
+            and pc_payload.get("session_pc_run_id") == self._pc_lua_run_id
+        )
+        self.pc_storage_layout_label.setText(
+            "Box layout: Resolved" if layout_resolved else "Box layout: Unresolved"
+        )
+        self.pc_storage_occupied_label.setText(
+            f"Boxed Pokemon: {len(state.valid_pokemon)}"
+            if state is not None and state.available else "Boxed Pokemon: --"
+        )
+        self.pc_storage_catch_status_label.setText(
+            f"Monitoring new catches: {'Yes' if self._pc_monitoring_ready else 'No'}"
+        )
+        self.pc_storage_progress_label.setText(
+            f"Progress: {progress.get('progress_percent', 0)}%"
+            if status == "Discovering PC layout" else ""
+        )
+        self.pc_storage_last_event_label.setText(f"Last PC event: {self._pc_last_event}")
+        cache_install = progress.get("cache_install") or {}
+        expected_name = self.pc_layout_species_combo.currentText()
+        expected_nickname = self.pc_layout_nickname_edit.text().strip() or "(any nickname)"
+        trace = acquisition_trace if isinstance(acquisition_trace, dict) else {}
+        monitor = monitor_debug if isinstance(monitor_debug, dict) else {}
+        self.pc_storage_advanced_summary_label.setText(
+            "Resolver\n"
+            f"  Lua run: {self._pc_lua_run_id or '--'}\n"
+            f"  Lua build: {pc_payload.get('lua_build_id', '--')}\n"
+            f"  First BoxPokemon: {pc_payload.get('session_pc_first_record_address') or discovery.get('session_pc_first_record_address') or '--'}\n"
+            f"  State: {self._pc_resolver_lifecycle}; cache validation: {cache_install.get('lua_validation', '--')}\n"
+            f"  Baseline: {len(self._pc_storage_baseline_ids) if self._pc_storage_tracking_active else '--'}; "
+            f"current occupied: {len(state.valid_pokemon) if state and state.available else '--'}\n"
+            "Acquisition\n"
+            f"  Last PC event: {self._pc_last_event}\n"
+            f"  Pending stability: {len(monitor.get('pending_stability', ()))}; "
+            f"BOX candidates emitted: {len(self._pc_storage_emitted_box_ids)}\n"
+            f"  Observer: {trace.get('status', '--')}; suppression: {trace.get('reason') or '--'}\n"
+            "Discovery Anchor\n"
+            f"  Box 1 Slot 1: {expected_nickname} / {expected_name}"
+        )
+        self.pc_storage_retry_cache_button.setVisible(
+            self._pc_resolver_lifecycle == "cache-confirmation-failed"
+        )
+
+    def _discover_current_pc_layout(self) -> bool:
+        species_id = self.pc_layout_species_combo.currentData()
+        nickname = self.pc_layout_nickname_edit.text().strip()
+        request = getattr(
+            self.ram_data_source,
+            "request_pc_storage_session_layout_discovery",
+            None,
+        )
+        if not isinstance(species_id, int) or not callable(request):
+            self.pc_storage_resolver_status_label.setText(
+                "PC resolver: failed to dispatch discovery"
+            )
+            return False
+        try:
+            dispatched = request(species_id, nickname or None)
+        except Exception as exc:
+            LOGGER.exception("Session PC layout discovery dispatch failed.")
+            self.pc_storage_resolver_status_label.setText(
+                f"PC resolver: failed ({type(exc).__name__}: {exc})"
+            )
+            return False
+        if not dispatched:
+            self.pc_storage_resolver_status_label.setText(
+                "PC resolver: failed to dispatch discovery"
+            )
+            return False
+        if (
+            self.settings.pc_box1_species_id != species_id
+            or self.settings.pc_box1_nickname != nickname
+        ):
+            self.settings.pc_box1_species_id = species_id
+            self.settings.pc_box1_nickname = nickname
+            try:
+                self.settings.save_default()
+            except OSError:
+                LOGGER.exception("Could not save the PC discovery anchor preference")
+        self._pc_layout_requested_at = time.monotonic()
+        self._pc_discovery_requested_at = self._pc_layout_requested_at
+        self.pc_storage_resolver_status_label.setText("PC resolver: discovering")
+        self.pc_storage_resolver_address_label.setText("First record: --")
+        self.pc_storage_discovery_status_label.setText("scanning...")
+        self.pc_storage_discovery_cancel_button.setEnabled(True)
+        LOGGER.info(
+            "Session-local PC layout discovery dispatched: expected=%s species=%s",
+            nickname or "(any nickname)",
+            self.pc_layout_species_combo.currentText(),
+        )
+        return True
+
+    def _retry_pc_storage_cache_install(self) -> None:
+        retry = getattr(self.ram_data_source, "retry_pc_storage_session_cache_install", None)
+        if not callable(retry) or not retry():
+            self.pc_storage_cache_status_label.setText(
+                "Cache install: retry failed; check Lua run ID and command transport"
+            )
+            return
+        self._pc_resolver_lifecycle = "cache-pending"
+        self.pc_storage_resolver_status_label.setText("PC resolver: cache-pending")
+        self.pc_storage_cache_status_label.setText(
+            "Cache install: retry queued; waiting for Lua confirmation"
+        )
+        self.pc_storage_retry_cache_button.setEnabled(False)
+
+    def _cancel_pc_storage_discovery(self) -> None:
+        request = getattr(
+            self.ram_data_source, "request_pc_storage_discovery_cancel", None
+        )
+        if not callable(request) or not request():
+            self.pc_storage_discovery_status_label.setText("failed: cancel dispatch failed")
+            LOGGER.error("PC discovery cancellation could not be dispatched.")
+            return
+        self.pc_storage_discovery_status_label.setText("cancelling...")
+        if self._pc_inspection_requested_at is not None:
+            self.pc_storage_inspection_status_label.setText("cancelling...")
+        self.pc_storage_discovery_cancel_button.setEnabled(False)
+
+    def _request_pc_storage_anchor_discovery(self) -> None:
+        raw_address = self.pc_storage_anchor_address_edit.text().strip()
+        address = _parse_optional_int(raw_address)
+        request = getattr(self.ram_data_source, "request_pc_storage_discovery", None)
+        LOGGER.info(
+            "PC anchor UI click: raw_address=%r parsed_address=%s",
+            raw_address,
+            f"0x{address:08X}" if address is not None else None,
+        )
+        if address is None:
+            error = f"failed: invalid address {raw_address!r}; enter a hex RAM address"
+            self.pc_storage_anchor_status_label.setText(error)
+            self.pc_storage_discovery_status_label.setText("failed")
+            LOGGER.error("PC anchor dispatch stopped: %s", error)
+            return
+        if not callable(request):
+            error = "failed: PC discovery transport is unavailable"
+            self.pc_storage_anchor_status_label.setText(error)
+            self.pc_storage_discovery_status_label.setText("failed")
+            LOGGER.error("PC anchor dispatch stopped: %s", error)
+            return
+        try:
+            dispatched = request(anchor_address=address)
+        except Exception as exc:
+            error = f"failed: transport raised {type(exc).__name__}: {exc}"
+            self.pc_storage_anchor_status_label.setText(error)
+            self.pc_storage_discovery_status_label.setText("failed")
+            LOGGER.exception("PC anchor transport raised an exception.")
+            return
+        if not dispatched:
+            error = "failed: BizHawk transport did not accept the anchor command"
+            self.pc_storage_anchor_status_label.setText(error)
+            self.pc_storage_discovery_status_label.setText("failed")
+            LOGGER.error("PC anchor dispatch failed: %s", error)
+            return
+        self._pc_anchor_requested_at = time.monotonic()
+        self._pc_anchor_requested_address = address
+        self._pc_discovery_requested_at = time.monotonic()
+        self.pc_storage_anchor_status_label.setText(
+            f"sent 0x{address:08X}; waiting for Lua response"
+        )
+        self.pc_storage_discovery_status_label.setText("scanning...")
+        self.pc_storage_discovery_cancel_button.setEnabled(True)
+        LOGGER.info("PC anchor command dispatched from UI: address=0x%08X", address)
+
+    def _inspect_pc_pokemon_anchor(self) -> None:
+        raw_address = self.pc_storage_anchor_address_edit.text().strip()
+        address = _parse_optional_int(raw_address)
+        request = getattr(self.ram_data_source, "request_pc_pokemon_inspection", None)
+        LOGGER.info(
+            "Pokemon anchor inspection UI click: raw_address=%r parsed_address=%s",
+            raw_address,
+            f"0x{address:08X}" if address is not None else None,
+        )
+        if address is None:
+            self.pc_storage_inspection_status_label.setText(
+                f"failed: invalid address {raw_address!r}"
+            )
+            return
+        if not callable(request):
+            self.pc_storage_inspection_status_label.setText(
+                "failed: inspection transport is unavailable"
+            )
+            return
+        try:
+            dispatched = request(address)
+        except Exception as exc:
+            LOGGER.exception("Pokemon anchor inspection transport raised an exception.")
+            self.pc_storage_inspection_status_label.setText(
+                f"failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        if not dispatched:
+            self.pc_storage_inspection_status_label.setText(
+                "failed: BizHawk did not accept the inspection command"
+            )
+            return
+        self._pc_inspection_requested_at = time.monotonic()
+        self._pc_inspection_requested_address = address
+        self._pc_discovery_requested_at = self._pc_inspection_requested_at
+        self.pc_storage_inspection_status_label.setText(
+            f"scanning Main RAM around 0x{address:08X}..."
+        )
+        self.pc_storage_discovery_cancel_button.setEnabled(True)
+        LOGGER.info(
+            "Pokemon anchor inspection command dispatched: address=0x%08X", address
+        )
+
+    def _search_pc_structure_pointers(self) -> None:
+        raw_address = self.pc_storage_anchor_address_edit.text().strip()
+        first_record_address = _parse_optional_int(raw_address)
+        if first_record_address is None:
+            self.pc_storage_pointer_search_status_label.setText(
+                f"failed: invalid address {raw_address!r}"
+            )
+            return
+        header_address = first_record_address - 0x28
+        request = getattr(
+            self.ram_data_source, "request_pc_structure_pointer_search", None
+        )
+        if not callable(request):
+            self.pc_storage_pointer_search_status_label.setText(
+                "failed: structure pointer search transport is unavailable"
+            )
+            return
+        try:
+            dispatched = request(header_address, first_record_address)
+        except Exception as exc:
+            LOGGER.exception("PC structure pointer search transport raised an exception.")
+            self.pc_storage_pointer_search_status_label.setText(
+                f"failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        if not dispatched:
+            self.pc_storage_pointer_search_status_label.setText(
+                "failed: BizHawk did not accept the pointer search command"
+            )
+            return
+        self._pc_pointer_search_requested_at = time.monotonic()
+        self._pc_discovery_requested_at = self._pc_pointer_search_requested_at
+        self.pc_storage_pointer_search_status_label.setText(
+            f"searching for references to 0x{header_address:08X} and "
+            f"0x{first_record_address:08X}..."
+        )
+        self.pc_storage_discovery_status_label.setText("scanning Main RAM...")
+        self.pc_storage_discovery_cancel_button.setEnabled(True)
+        LOGGER.info(
+            "PC structure pointer search dispatched: header=0x%08X first_record=0x%08X",
+            header_address,
+            first_record_address,
+        )
+
+    def _reset_pc_pokemon_inspection_baseline(self) -> None:
+        reset = getattr(
+            self.ram_data_source, "reset_pc_pokemon_inspection_baseline", None
+        )
+        if not callable(reset):
+            self.pc_storage_inspection_status_label.setText(
+                "failed: inspection baseline control is unavailable"
+            )
+            return
+        reset()
+        self.pc_storage_inspection_status_label.setText(
+            "baseline cleared; next inspection captures it"
+        )
+
+    def _search_pc_pokemon_identity(self) -> None:
+        request = getattr(self.ram_data_source, "request_pc_pokemon_search", None)
+        if not callable(request):
+            self.pc_storage_inspection_status_label.setText(
+                "failed: Pokemon identity search transport is unavailable"
+            )
+            return
+        try:
+            dispatched = request()
+        except Exception as exc:
+            LOGGER.exception("Pokemon identity search transport raised an exception.")
+            self.pc_storage_inspection_status_label.setText(
+                f"failed: {type(exc).__name__}: {exc}"
+            )
+            return
+        if not dispatched:
+            self.pc_storage_inspection_status_label.setText(
+                "failed: inspect a checksum-valid anchor first, then search RAM"
+            )
+            return
+        self._pc_search_requested_at = time.monotonic()
+        self._pc_search_requested_address = _parse_optional_int(
+            self.pc_storage_anchor_address_edit.text().strip()
+        ) or self._pc_last_inspected_address
+        self.pc_storage_inspection_status_label.setText(
+            "searching Main RAM for the last inspected Pokemon..."
+        )
+        self.pc_storage_discovery_cancel_button.setEnabled(True)
+        LOGGER.info("Pokemon identity RAM search dispatched from UI.")
+
+    def _refresh_pc_storage_debug(
+        self,
+        state,
+        payload,
+        payload_fresh: bool,
+        stable_pokemon=(),
+        changes=(),
+        discovery_payload=None,
+        discovery_progress=None,
+        monitor_debug=None,
+        acquisition_trace=None,
+    ) -> None:
+        received_at = getattr(payload, "received_at", None)
+        pc_payload_data = getattr(payload, "payload", {})
+        discovery_payload_data = getattr(discovery_payload, "payload", {})
+        resolved_address = (
+            pc_payload_data.get("session_pc_first_record_address")
+            if isinstance(pc_payload_data, dict)
+            else None
+        )
+        if not resolved_address and isinstance(discovery_payload_data, dict):
+            resolved_address = discovery_payload_data.get("session_pc_first_record_address")
+        current_run = pc_payload_data.get("lua_run_id") if isinstance(pc_payload_data, dict) else None
+        discovered_run = (
+            discovery_payload_data.get("session_lua_run_id")
+            if isinstance(discovery_payload_data, dict) else None
+        )
+        resolver_status = self._pc_resolver_lifecycle
+        if current_run and discovered_run and current_run != discovered_run:
+            resolver_status = "stale"
+        if resolver_status in {"cache-pending", "baseline-ready"}:
+            self._pc_layout_requested_at = None
+        self.pc_storage_resolver_status_label.setText(
+            f"PC resolver: {resolver_status}"
+        )
+        self.pc_storage_resolver_address_label.setText(
+            f"First record: {resolved_address or '--'}"
+        )
+        self.pc_storage_baseline_count_label.setText(
+            "Baseline occupied Pokemon: "
+            f"{len(self._pc_storage_baseline_ids) if self._pc_storage_tracking_active else '--'}"
+        )
+        self.pc_storage_monitoring_label.setText(
+            "Monitoring for new boxed Pokemon: "
+            f"{'yes' if self._pc_monitoring_ready else 'no'}"
+        )
+        self.pc_storage_baseline_message_label.setText(
+            "PC baseline established. New Pokemon appearing after this point will be treated "
+            "as acquisition candidates."
+            if self._pc_monitoring_ready else
+            "Waiting for Lua cache confirmation and a validated PC scan before arming BOX acquisitions."
+            if resolver_status in {"cache-pending", "resolved-awaiting-baseline"} else ""
+        )
+        cache_install = (
+            discovery_progress.get("cache_install")
+            if isinstance(discovery_progress, dict) else None
+        )
+        if isinstance(cache_install, dict):
+            confirmation_at = cache_install.get("last_confirmation_at")
+            confirmation_age = (
+                f"{max(0.0, time.monotonic() - confirmation_at):.1f}s"
+                if isinstance(confirmation_at, (int, float)) else "--"
+            )
+            self.pc_storage_cache_status_label.setText(
+                f"Cache install: command sent={cache_install.get('command_sent', False)}; "
+                f"queued={cache_install.get('command_queued', False)}; "
+                f"Lua received={cache_install.get('lua_received', False)}; "
+                f"Lua validation={cache_install.get('lua_validation', 'pending')}; "
+                f"confirmation received={cache_install.get('confirmation_received', False)}; "
+                f"address={cache_install.get('address') or '--'}; "
+                f"expected run={cache_install.get('lua_run_id') or '--'}; "
+                f"last Lua run={cache_install.get('last_lua_run_id') or current_run or '--'}; "
+                f"confirmation age={confirmation_age}"
+                + (f"; error={cache_install['error']}" if cache_install.get("error") else "")
+            )
+        self.pc_storage_retry_cache_button.setEnabled(
+            resolver_status == "cache-confirmation-failed"
+            and isinstance(cache_install, dict)
+            and cache_install.get("lua_run_id") == current_run
+        )
+        if (
+            self._pc_anchor_requested_at is not None
+            and time.monotonic() - self._pc_anchor_requested_at >= 30.0
+        ):
+            error = (
+                "failed: no Lua anchor result after 30s; check that BizHawk is advancing "
+                "frames and polling the command file"
+            )
+            self.pc_storage_anchor_status_label.setText(error)
+            LOGGER.error(
+                "PC anchor timed out waiting for Lua: address=%s",
+                f"0x{self._pc_anchor_requested_address:08X}"
+                if self._pc_anchor_requested_address is not None
+                else None,
+            )
+            self._pc_anchor_requested_at = None
+            self._pc_anchor_requested_address = None
+        if (
+            self._pc_pointer_search_requested_at is not None
+            and time.monotonic() - self._pc_pointer_search_requested_at >= 90.0
+        ):
+            self.pc_storage_pointer_search_status_label.setText(
+                "failed: no Lua pointer-search result after 90s"
+            )
+            self._pc_pointer_search_requested_at = None
+        if (
+            self._pc_layout_requested_at is not None
+            and resolver_status == "discovering"
+            and time.monotonic() - self._pc_layout_requested_at >= 300.0
+        ):
+            self.pc_storage_resolver_status_label.setText(
+                "PC resolver: stale (no Lua cache confirmation after 5 minutes)"
+            )
+            self.pc_storage_discovery_status_label.setText("failed")
+            self._pc_layout_requested_at = None
+        if (
+            self._pc_scan_requested_at is not None
+            and isinstance(received_at, (int, float))
+            and received_at >= self._pc_scan_requested_at
+        ):
+            frame = getattr(state, "scan_frame", None)
+            self.pc_storage_scan_status_label.setText(
+                f"Fresh scan received at frame {frame if frame is not None else '--'}."
+            )
+            self._pc_scan_requested_at = None
+
+        if state is None:
+            summary = "PC STORAGE READ UNAVAILABLE\nNo PC storage scan has been received."
+        elif not state.available:
+            summary = (
+                "PC STORAGE READ INVALID\n"
+                f"0 / {state.records_scanned} valid Pokémon records\n"
+                f"{state.error or 'PC storage source validation failed.'}"
+            )
+        else:
+            valid_count = len(state.valid_pokemon)
+            if valid_count == 0 and state.records:
+                summary = (
+                    "PC STORAGE READ INVALID\n"
+                    f"0 / {state.records_scanned} valid Pokémon records; "
+                    f"{len(state.records)} non-empty records failed validation."
+                )
+            else:
+                summary = (
+                    f"PC STORAGE SCAN VALID\n{valid_count} / "
+                    f"{state.records_scanned} valid Pokémon records"
+                )
+                if valid_count == 0:
+                    summary += " (no occupied records reported)."
+        if summary != self.pc_storage_summary_label.text():
+            self.pc_storage_summary_label.setText(summary)
+
+        self._refresh_pc_storage_discovery_results(
+            discovery_payload if discovery_payload is not None else payload
+        )
+        self._refresh_pc_storage_discovery_progress(discovery_progress)
+        details = self._pc_storage_debug_text(
+            state, payload, payload_fresh, stable_pokemon, changes,
+            monitor_debug, acquisition_trace, discovery_payload,
+        )
+        self._set_pc_storage_debug_text(details)
+        self._last_pc_storage_scan_frame = getattr(state, "scan_frame", None)
+
+    def _pc_storage_debug_text(
+        self, state, payload, payload_fresh: bool, stable_pokemon=(), changes=(),
+        monitor_debug=None, acquisition_trace=None, discovery_payload=None,
+    ) -> str:
+        source = getattr(payload, "source", None) or "--"
+        received_at = getattr(payload, "received_at", None)
+        age = (
+            f"{max(0.0, time.monotonic() - received_at):.1f}s"
+            if isinstance(received_at, (int, float))
+            else "--"
+        )
+        received_bytes = getattr(payload, "bytes_received", 0) or 0
+        pointer = getattr(state, "save_data_pointer", None)
+        pc_boxes_address = getattr(state, "pc_boxes_address", None)
+        records_address = getattr(state, "records_address", None)
+        payload_data = getattr(payload, "payload", {})
+        reader_version = (
+            payload_data.get("pc_storage_reader_version", "unmarked / legacy Lua script")
+            if isinstance(payload_data, dict)
+            else "unmarked / legacy Lua script"
+        )
+        lines = [
+            "PC Storage Debug",
+            f"Storage source: {source} / Main RAM",
+            (
+                "Lua build ID: "
+                f"{payload_data.get('lua_build_id', '--') if isinstance(payload_data, dict) else '--'}"
+            ),
+            (
+                "Lua configured game: "
+                f"{payload_data.get('lua_game_id', '--') if isinstance(payload_data, dict) else '--'} / "
+                f"{payload_data.get('lua_game_version', '--') if isinstance(payload_data, dict) else '--'}"
+            ),
+            (
+                "Lua script source: "
+                f"{payload_data.get('lua_script_source', '--') if isinstance(payload_data, dict) else '--'}"
+            ),
+            (
+                "Lua run ID: "
+                f"{payload_data.get('run_id', '--') if isinstance(payload_data, dict) else '--'}"
+            ),
+            f"Lua PC reader version: {reader_version}",
+            f"PC resolver lifecycle: {self._pc_resolver_lifecycle}",
+            (
+                "PC resolver status: "
+                f"{payload_data.get('pc_storage_resolver_status', 'unresolved') if isinstance(payload_data, dict) else 'unresolved'}"
+            ),
+            (
+                "Resolved first record: "
+                f"{payload_data.get('session_pc_first_record_address', '--') if isinstance(payload_data, dict) else '--'}"
+            ),
+            (
+                "Resolver scope: Lua run "
+                f"{payload_data.get('session_pc_run_id', '--') if isinstance(payload_data, dict) else '--'}"
+            ),
+            f"Party-reader pointer slot (not proven SaveData): {_format_optional_hex(SAVE_DATA_POINTER_ADDRESS)}",
+            f"Party-reader pointer value (not used for PC resolution): {_format_optional_hex(pointer)}",
+            "SavePageInfo: not used by the session-local PC resolver",
+            (
+                "Resolved PC record array start: "
+                f"{_format_optional_hex(pc_boxes_address)}"
+            ),
+            f"Final first BoxPokemon address: {_format_optional_hex(records_address)}",
+            f"Raw bytes 0x28 before first record: {getattr(state, 'pc_boxes_header_hex', None) or '--'}",
+            f"Final address RAM validation: {str(getattr(state, 'final_address_valid', False)).lower()}",
+            f"First BoxPokemon record: {_format_optional_hex(records_address)}",
+            f"Record size: 0x{BOX_POKEMON_SIZE:X} ({BOX_POKEMON_SIZE} bytes)",
+            (
+                f"Expected boxes: {PC_BOX_COUNT}; slots per box: {PC_BOX_SLOTS}; "
+                f"total slots: {PC_BOX_COUNT * PC_BOX_SLOTS}"
+            ),
+            (
+                f"Scan length: {PC_BOX_RECORDS_SIZE:,} bytes; bytes read from RAM: "
+                f"{getattr(state, 'bytes_read', 0):,}"
+            ),
+            (
+                f"Last scan frame: {getattr(state, 'scan_frame', None) if state else '--'}; "
+                f"age: {age}; fresh: {str(payload_fresh).lower()}"
+            ),
+            f"Bytes received: {received_bytes:,}",
+            f"Valid records: {len(state.valid_pokemon) if state else 0}",
+            f"Stable identities: {len(stable_pokemon)}",
+            f"Baseline identity count: {len(self._pc_storage_baseline_ids) if self._pc_storage_tracking_active else '--'}",
+            f"Current identity count: {len(state.valid_pokemon) if state and state.available else '--'}",
+            f"Additions since baseline: {len(self._pc_storage_post_baseline_ids)}",
+            f"Pending stability candidates: {len(monitor_debug.get('pending_stability', ())) if isinstance(monitor_debug, dict) else 0}",
+            f"Emitted BOX candidates: {len(self._pc_storage_emitted_box_ids)}",
+            f"Monitoring armed: {str(self._pc_monitoring_ready).lower()}",
+            f"Empty records: {state.empty_records if state else '--'}",
+            f"Checksum failures: {state.checksum_failures if state else 0}",
+            f"Malformed records: {getattr(state, 'malformed_records', 0)}",
+            f"Scan result: {getattr(state, 'error', None) or ('OK' if state and state.available else 'Waiting for scan')}",
+        ]
+        discovery_data = getattr(discovery_payload, "payload", {})
+        cache_validation = (
+            discovery_data.get("cache_validation")
+            if isinstance(discovery_data, dict) else None
+        )
+        if isinstance(cache_validation, dict):
+            lines.extend(("", "PC Cache Validation"))
+            for label, key, fields in (
+                ("Run ID match", "run_id_match", ("expected", "actual", "pass")),
+                ("Main RAM range", "main_ram_range", (
+                    "first_record", "final_record_end", "main_ram_start",
+                    "main_ram_end", "domain_offset", "pass",
+                )),
+                ("Party range", "party_range", (
+                    "available", "party_base", "party_count", "party_record_size",
+                    "party_byte_count", "party_end",
+                    "pc_region_overlaps_party", "pass",
+                )),
+                ("Anchor RAM read", "anchor_record_ram_read", (
+                    "absolute_address", "domain_offset", "bytes_read",
+                    "first_64_bytes_hex", "pass",
+                )),
+                ("Anchor checksum", "anchor_checksum", (
+                    "stored", "calculated", "shuffle_index", "pass",
+                )),
+                ("Anchor species", "anchor_species", (
+                    "decoded_species_id", "decoded_species_name",
+                    "expected_species_id", "expected_species_name", "pass",
+                )),
+                ("Anchor nickname", "anchor_nickname", (
+                    "decoded_nickname", "expected_nickname", "decoded_by",
+                    "checked_by_lua", "pass",
+                )),
+                ("Anchor sanity", "anchor_sanity", ("value", "pass")),
+                ("540-slot layout", "layout", (
+                    "attempted", "valid_occupied", "empty", "malformed", "pass",
+                )),
+                ("Python/Lua bytes", "anchor_byte_comparison", (
+                    "bytes_match", "python_first_64_bytes_hex", "lua_first_64_bytes_hex",
+                )),
+                ("Python decode of Lua bytes", "python_anchor_decode", (
+                    "species_id", "species_name", "nickname", "checksum_valid",
+                    "stored_checksum", "calculated_checksum", "shuffle_index",
+                )),
+            ):
+                check = cache_validation.get(key)
+                if isinstance(check, dict):
+                    lines.append(f"{label}: " + "; ".join(
+                        f"{field}={check.get(field, '--')}" for field in fields
+                    ))
+            if cache_validation.get("python_decode_error"):
+                lines.append(f"Python decode error: {cache_validation['python_decode_error']}")
+        if isinstance(monitor_debug, dict):
+            lines.extend((
+                "", "PC Occupancy Trace",
+                f"Status: {monitor_debug.get('status', '--')}; frame: {monitor_debug.get('frame', '--')}",
+                f"Reason: {monitor_debug.get('reason', '--')}",
+            ))
+            for label, key in (
+                ("Previous occupied", "previous"),
+                ("Current occupied", "current"),
+                ("New identities", "added"),
+                ("Removed identities", "removed"),
+                ("Stable new identities", "stable_new"),
+                ("Awaiting second scan", "pending_stability"),
+            ):
+                identities = monitor_debug.get(key) or []
+                lines.append(f"{label}: {len(identities)}")
+                for item in identities:
+                    lines.append(
+                        f"  {item.get('stable_id')} · Box {item.get('box')} Slot {item.get('slot')} · "
+                        f"{item.get('nickname') or item.get('species')} / {item.get('species')} · "
+                        f"PID {item.get('pid')} · checksum {item.get('checksum')}"
+                    )
+        if isinstance(acquisition_trace, dict):
+            lines.extend((
+                "", "BOX Acquisition Trace",
+                (f"Candidate: {acquisition_trace.get('stable_id', '--')} · "
+                 f"{acquisition_trace.get('pokemon', '--')} / {acquisition_trace.get('species', '--')}"),
+                (f"Source: {acquisition_trace.get('source', '--')}; "
+                 f"Box {acquisition_trace.get('box', '--')} Slot {acquisition_trace.get('slot', '--')}"),
+                f"Location: {acquisition_trace.get('location', '--')}",
+                (f"Baseline member: {acquisition_trace.get('baseline_member', '--')}; "
+                 f"already observed: {acquisition_trace.get('already_observed', '--')}"),
+                (f"Status: {acquisition_trace.get('status', '--')}; reason: "
+                 f"{acquisition_trace.get('reason', '--')}"),
+            ))
+        diagnostic_candidates = getattr(state, "diagnostic_candidates", ())
+        if diagnostic_candidates:
+            lines.extend(("", "PC Storage Diagnostic PageInfo Candidates:"))
+            for candidate in diagnostic_candidates:
+                lines.append(
+                    "  "
+                    + ", ".join(
+                        f"{key}={value}"
+                        for key, value in candidate.items()
+                    )
+                )
+        if changes:
+            lines.extend(("", "PC Storage Changes (RAM diff; before Nuzlocke processing):"))
+            for mon in changes:
+                decoded = mon.decoded
+                location = mon.met_location_name or f"Unknown #{decoded.met_location_id}"
+                lines.extend(
+                    (
+                        f"NEW: Box {mon.box_index} Slot {mon.slot_index}",
+                        f"Species: {mon.species_name}; nickname: {decoded.nickname or mon.species_name}",
+                        (
+                            f"PID: 0x{decoded.pid:08X}; checksum: "
+                            f"{'VALID' if decoded.checksum_valid else 'INVALID'}"
+                        ),
+                        (
+                            f"Met location: {location} (ID {decoded.met_location_id}); "
+                            f"met level: {decoded.met_level if decoded.met_level is not None else '--'}"
+                        ),
+                    )
+                )
+        if state is not None and state.records:
+            lines.extend(("", "Non-empty box records:"))
+            for mon in state.records:
+                decoded = mon.decoded
+                record_address = records_address + (
+                    (mon.box_index - 1) * PC_BOX_SLOTS + mon.slot_index - 1
+                ) * BOX_POKEMON_SIZE
+                location = mon.met_location_name or f"Unknown #{decoded.met_location_id}"
+                lines.extend(
+                    (
+                        f"Box {mon.box_index} Slot {mon.slot_index}",
+                        f"  Address: {_format_optional_hex(record_address)}",
+                        f"  Species: {mon.species_name} (#{decoded.species_id})",
+                        f"  Nickname: {decoded.nickname or mon.species_name}",
+                        f"  PID: 0x{decoded.pid:08X}",
+                        (
+                            f"  Checksum: {'VALID' if decoded.checksum_valid else 'INVALID'} "
+                            f"(stored 0x{decoded.checksum:04X}, calculated 0x{decoded.calculated_checksum:04X})"
+                        ),
+                        f"  Met location: {location} (ID {decoded.met_location_id})",
+                        f"  Met level: {decoded.met_level if decoded.met_level is not None else '--'}",
+                        f"  Raw 136-byte record: {getattr(mon, 'raw_hex', '') or '--'}",
+                    )
+                )
+        elif state is not None and state.available:
+            lines.extend(("", "No non-empty PC BoxPokemon records were reported by the Lua scan."))
+        lines.append("")
+        return "\n".join(lines)
+
+    def _refresh_pc_storage_discovery_results(self, payload) -> None:
+        payload_data = getattr(payload, "payload", {})
+        if not isinstance(payload_data, dict):
+            return
+        is_discovery_result = payload_data.get("pc_storage_discovery_requested") is True
+        is_anchor_result = payload_data.get("pc_storage_anchor_result") is True
+        is_inspection_result = (
+            payload_data.get("pc_storage_pokemon_inspection_result") is True
+        )
+        is_search_result = payload_data.get("pc_storage_pokemon_search_result") is True
+        is_pointer_search_result = (
+            payload_data.get("pc_storage_structure_pointer_search_result") is True
+        )
+        is_session_layout_result = (
+            payload_data.get("pc_storage_session_layout_result") is True
+        )
+        if not (
+            is_discovery_result
+            or is_anchor_result
+            or is_inspection_result
+            or is_search_result
+            or is_pointer_search_result
+            or is_session_layout_result
+        ):
+            return
+
+        result_key = (
+            payload_data.get("run_id"),
+            payload_data.get("frame"),
+            payload_data.get("pc_storage_discovery_summary", {}).get("mode")
+            if isinstance(payload_data.get("pc_storage_discovery_summary"), dict)
+            else None,
+            is_inspection_result,
+            is_search_result,
+            is_pointer_search_result,
+            is_session_layout_result,
+        )
+        is_new_result = result_key != self._last_pc_storage_discovery_key
+        payload_received_at = getattr(payload, "received_at", None)
+        operation_requested_at = (
+            self._pc_pointer_search_requested_at
+            if is_pointer_search_result
+            else self._pc_layout_requested_at
+            if is_session_layout_result
+            else self._pc_search_requested_at
+            if is_search_result
+            else self._pc_discovery_requested_at
+        )
+        discovery_request_is_current = (
+            operation_requested_at is None
+            or not isinstance(payload_received_at, (int, float))
+            or payload_received_at >= operation_requested_at
+        )
+        anchor_address = _parse_optional_int(payload_data.get("pc_storage_anchor_address"))
+        inspection_address = _parse_optional_int(
+            payload_data.get("pc_storage_inspection_anchor_address")
+        )
+        anchor_request_matches = (
+            is_anchor_result
+            and self._pc_anchor_requested_at is not None
+            and isinstance(payload_received_at, (int, float))
+            and payload_received_at >= self._pc_anchor_requested_at
+            and anchor_address == self._pc_anchor_requested_address
+        )
+        inspection_request_matches = (
+            is_inspection_result
+            and self._pc_inspection_requested_at is not None
+            and isinstance(payload_received_at, (int, float))
+            and payload_received_at >= self._pc_inspection_requested_at
+            and inspection_address == self._pc_inspection_requested_address
+        )
+        search_anchor = _parse_optional_int(
+            payload_data.get("pc_storage_inspection_anchor_address")
+        )
+        search_request_matches = (
+            is_search_result
+            and self._pc_search_requested_at is not None
+            and isinstance(payload_received_at, (int, float))
+            and payload_received_at >= self._pc_search_requested_at
+            and search_anchor == self._pc_search_requested_address
+        )
+        if is_new_result:
+            LOGGER.info(
+                "UI received PC discovery payload: frame=%s requested=%s "
+                "anchor_result=%s inspection_result=%s search_result=%s anchor=%s",
+                payload_data.get("frame"),
+                is_discovery_result,
+                is_anchor_result,
+                is_inspection_result,
+                is_search_result,
+                payload_data.get("pc_storage_anchor_address"),
+            )
+            self._last_pc_storage_discovery_key = result_key
+        elif is_inspection_result:
+            return
+
+        lines = ["PC Storage Discovery"]
+        if is_session_layout_result:
+            expected = payload_data.get("expected_box1_slot1", {})
+            lines.extend(
+                (
+                    (
+                        f"Expected Box 1 Slot 1: {expected.get('nickname') or '(any nickname)'} / "
+                        f"{_gen4_species_names().get(expected.get('species_id'), 'unknown species')}"
+                    ),
+                    f"Lua run: {payload_data.get('session_lua_run_id', '--')}",
+                    f"Resolver status: {payload_data.get('pc_storage_resolver_status', 'unresolved')}",
+                    f"Resolved first record: {payload_data.get('session_pc_first_record_address', '--')}",
+                )
+            )
+        elif is_search_result:
+            lines.append(
+                "Pokemon identity search result: "
+                f"anchor={payload_data.get('pc_storage_inspection_anchor_address', '--')}, "
+                f"frame={payload_data.get('frame', '--')}"
+            )
+        else:
+            lines.append(
+                "Payload result: "
+                f"anchor={is_anchor_result}, "
+                f"address={payload_data.get('pc_storage_anchor_address', '--')}, "
+                f"frame={payload_data.get('frame', '--')}"
+            )
+        discovery_summary = payload_data.get("pc_storage_discovery_summary")
+        discovery_cancelled = (
+            isinstance(discovery_summary, dict)
+            and discovery_summary.get("cancelled") is True
+        )
+        discovery_candidates = payload_data.get("pc_storage_discovery_candidates")
+        if isinstance(discovery_summary, dict):
+            lines.append(
+                "Summary: "
+                + ", ".join(f"{key}={value}" for key, value in discovery_summary.items())
+            )
+        else:
+            lines.append("Summary: discovery payload did not include a summary.")
+
+        party_range_available = (
+            isinstance(discovery_summary, dict)
+            and discovery_summary.get("party_range_available") is True
+        )
+        party_range = (
+            discovery_summary.get("party_range")
+            if isinstance(discovery_summary, dict)
+            else None
+        )
+        if party_range_available and isinstance(party_range, dict):
+            lines.append(
+                "Active party RAM range: "
+                f"[{party_range.get('start_address', '--')}, "
+                f"{party_range.get('end_address_exclusive', '--')}) "
+                f"({party_range.get('party_count', '--')} x "
+                f"{party_range.get('record_size', '--')} bytes)"
+            )
+        else:
+            lines.append("Active party RAM range: unavailable")
+        if is_session_layout_result:
+            candidates = payload_data.get("pc_storage_discovery_candidates", [])
+            lines.append("540-slot candidate evaluations:")
+            if isinstance(candidates, list) and candidates:
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    lines.append(
+                        f"  {candidate.get('first_box_pokemon_address', '--')}: "
+                        f"valid={candidate.get('valid_occupied_records', 0)}, "
+                        f"empty={candidate.get('empty_records', 0)}, "
+                        f"header-zero empty={candidate.get('zero_header_nonzero_payload_empty_records', 0)}, "
+                        f"empty patterns={candidate.get('distinct_empty_patterns', '--')}, "
+                        f"invalid={candidate.get('invalid_records', 0)}, "
+                        f"party overlap={candidate.get('party_region_overlap', '--')}, "
+                        f"plausible={candidate.get('plausible', False)}"
+                    )
+                    for sample in candidate.get("invalid_record_samples", [])[:4]:
+                        lines.append(
+                            f"    malformed Box {sample.get('box')} Slot {sample.get('slot')} "
+                            f"at {sample.get('address')}: {sample.get('first_32_bytes_hex')}"
+                        )
+                    for pattern in candidate.get("empty_pattern_samples", [])[:3]:
+                        lines.append(
+                            f"    empty pattern x{pattern.get('count')}: "
+                            f"{pattern.get('first_32_bytes_hex')}"
+                        )
+            else:
+                lines.append("  No matching non-party candidate formed a plausible 540-slot array.")
+            occupied = payload_data.get("pc_storage_decoded_occupied", [])
+            lines.append("Decoded occupied slots:")
+            if isinstance(occupied, list) and occupied:
+                for mon in occupied:
+                    if not isinstance(mon, dict):
+                        continue
+                    species_id = _parse_optional_int(mon.get("species_id"))
+                    species_name = _gen4_species_names().get(
+                        species_id,
+                        f"Unknown #{species_id if species_id is not None else '--'}",
+                    )
+                    lines.append(
+                        f"  Box {mon.get('box')} Slot {mon.get('slot')} "
+                        f"{mon.get('address')}: {mon.get('nickname') or '--'} / "
+                        f"{species_name}, checksum={mon.get('checksum_valid', False)}"
+                    )
+            else:
+                lines.append("  No decoded occupied slots in the selected candidate.")
+        elif is_pointer_search_result:
+            lines.extend(self._pc_structure_pointer_search_lines(payload_data))
+        elif is_inspection_result:
+            lines.extend(self._pc_pokemon_inspection_lines(payload_data))
+        elif is_search_result:
+            lines.extend(self._pc_pokemon_search_lines(payload_data))
+        else:
+            identity_matches = payload_data.get(
+                "pc_storage_discovery_identity_matches"
+            )
+            lines.extend(("", "Expected identity matches outside party RAM:"))
+            if not party_range_available:
+                lines.append(
+                    "Unable to classify identity matches because the active party range is unavailable."
+                )
+            elif isinstance(identity_matches, list) and identity_matches:
+                species_names = _gen4_species_names()
+                for match in identity_matches:
+                    if not isinstance(match, dict):
+                        continue
+                    species_id = _parse_optional_int(match.get("species_id"))
+                    species_name = species_names.get(
+                        species_id, f"Unknown #{species_id if species_id is not None else '--'}"
+                    )
+                    lines.append(
+                        f"  {match.get('address', '--')}: {match.get('nickname') or '--'} "
+                        f"({species_name}, #{species_id if species_id is not None else '--'}); "
+                        f"checksum valid={match.get('checksum_valid', False)}, "
+                        f"party overlap={match.get('party_overlap', '--')}"
+                    )
+            else:
+                lines.append("No matching expected-identity records were found.")
+
+        excluded_party_records = payload_data.get("pc_storage_excluded_party_records")
+        lines.extend(("", "Excluded party records:"))
+        if isinstance(excluded_party_records, list) and excluded_party_records:
+            species_names = _gen4_species_names()
+            for record in excluded_party_records:
+                if not isinstance(record, dict):
+                    continue
+                species_id = _parse_optional_int(record.get("species_id"))
+                species_name = species_names.get(
+                    species_id, f"Unknown #{species_id if species_id is not None else '--'}"
+                )
+                lines.append(
+                    f"  {record.get('address', '--')}, party slot {record.get('party_slot', '--')}: "
+                    f"{record.get('nickname') or species_name}/{species_name} "
+                    f"(#{species_id if species_id is not None else '--'}), "
+                    f"checksum valid={record.get('checksum_valid', False)}"
+                )
+        else:
+            lines.append("  None recognized in this scan.")
+
+        if (
+            not is_inspection_result
+            and not is_search_result
+            and not is_pointer_search_result
+            and not is_session_layout_result
+        ):
+            if isinstance(discovery_candidates, list) and discovery_candidates:
+                lines.append("")
+                lines.append("Candidate PCBoxes Regions:")
+                for candidate in discovery_candidates:
+                    lines.extend(self._pc_storage_discovery_candidate_lines(candidate))
+            else:
+                lines.append("")
+                lines.append("No candidate PCBoxes regions were reported.")
+
+            anchor_diagnostic = payload_data.get("pc_storage_anchor_diagnostic")
+            lines.extend(("", "Known Box 1 Slot 1 Anchor:"))
+            if isinstance(anchor_diagnostic, dict):
+                lines.extend(self._pc_storage_anchor_diagnostic_lines(anchor_diagnostic))
+            else:
+                lines.append("No anchor address was supplied for this scan.")
+
+        probe_rows = payload_data.get("runtime_base_probe_rows")
+        if isinstance(probe_rows, list) and probe_rows:
+            lines.extend(("", "Runtime Pointer Probe (-0x400..+0x0FFF):"))
+            for row in probe_rows:
+                if not isinstance(row, dict):
+                    continue
+                u32_values = row.get("u32_le")
+                u32_text = (
+                    ", ".join(str(value) for value in u32_values)
+                    if isinstance(u32_values, list)
+                    else "--"
+                )
+                lines.append(
+                    "  "
+                    f"{row.get('relative_offset', '--')} "
+                    f"{row.get('address', '--')} "
+                    f"valid={str(row.get('valid_ram', False)).lower()} "
+                    f"bytes={row.get('hex') or '--'} "
+                    f"u32=[{u32_text}]"
+                )
+
+        self._last_pc_storage_discovery_text = "\n".join(lines)
+        self._set_pc_storage_discovery_text(self._last_pc_storage_discovery_text)
+        if is_session_layout_result and discovery_request_is_current:
+            resolver_status = str(
+                payload_data.get("pc_storage_resolver_status") or "unresolved"
+            )
+            address = payload_data.get("session_pc_first_record_address")
+            if resolver_status == "cache-pending":
+                if self._pc_resolver_lifecycle in {"unresolved", "discovering", "cache-pending"}:
+                    self._pc_resolver_lifecycle = "cache-pending"
+                    self.pc_storage_resolver_status_label.setText("PC resolver: cache-pending")
+                    self.pc_storage_resolver_address_label.setText(
+                        f"First record: {address or '--'}"
+                    )
+                self.pc_storage_discovery_status_label.setText(
+                    "completed" if self._pc_resolver_lifecycle == "baseline-ready"
+                    else "waiting for Lua cache confirmation"
+                )
+            elif resolver_status == "resolved for this session":
+                if self._pc_resolver_lifecycle != "baseline-ready":
+                    self._pc_resolver_lifecycle = "resolved-awaiting-baseline"
+                    self.pc_storage_resolver_status_label.setText(
+                        "PC resolver: resolved-awaiting-baseline"
+                    )
+                    self.pc_storage_resolver_address_label.setText(
+                        f"First record: {address or '--'}"
+                    )
+                self.pc_storage_discovery_status_label.setText("completed")
+                self._pc_layout_requested_at = None
+            else:
+                error = payload_data.get("pc_storage_resolver_error") or payload_data.get(
+                    "pc_storage_anchor_error"
+                )
+                if self._pc_resolver_lifecycle not in {"baseline-ready", "cache-pending"}:
+                    self._pc_resolver_lifecycle = resolver_status
+                    self.pc_storage_resolver_status_label.setText(
+                        f"PC resolver: {resolver_status}"
+                    )
+                    self.pc_storage_resolver_address_label.setText(
+                        f"First record: {address or '--'}"
+                    )
+                self.pc_storage_discovery_status_label.setText(
+                    "retrying cache install" if self._pc_resolver_lifecycle == "cache-pending"
+                    else "failed" if error else "completed; no valid layout"
+                )
+                self._pc_layout_requested_at = None
+        elif discovery_request_is_current:
+            if discovery_cancelled:
+                result_status = "cancelled"
+            elif isinstance(discovery_summary, dict) and discovery_summary.get("error"):
+                result_status = "failed"
+            else:
+                result_status = "completed"
+            self.pc_storage_discovery_status_label.setText(result_status)
+        anchor_error = payload_data.get("pc_storage_anchor_error")
+        if is_anchor_result and discovery_cancelled:
+            self.pc_storage_anchor_status_label.setText("cancelled")
+            self._pc_anchor_requested_at = None
+            self._pc_anchor_requested_address = None
+        elif is_anchor_result and (
+            anchor_request_matches
+            or (is_new_result and self._pc_anchor_requested_at is None)
+        ):
+            if anchor_error:
+                self.pc_storage_anchor_status_label.setText(f"failed: {anchor_error}")
+            elif not isinstance(anchor_diagnostic, dict):
+                self.pc_storage_anchor_status_label.setText(
+                    "failed: Lua payload omitted anchor diagnostic"
+                )
+            else:
+                anchor = payload_data.get("pc_storage_anchor_address", "--")
+                self.pc_storage_anchor_status_label.setText(
+                    f"completed: {anchor or '--'} at frame {payload_data.get('frame', '--')}"
+                )
+            if anchor_request_matches:
+                self._pc_anchor_requested_at = None
+                self._pc_anchor_requested_address = None
+        if discovery_request_is_current:
+            self._pc_discovery_requested_at = None
+
+        inspection_error = payload_data.get("pc_storage_anchor_error")
+        if is_inspection_result and inspection_request_matches:
+            self._pc_last_inspected_address = inspection_address
+            if discovery_cancelled:
+                self.pc_storage_inspection_status_label.setText("cancelled")
+            elif inspection_error:
+                self.pc_storage_inspection_status_label.setText(
+                    f"failed: {inspection_error}"
+                )
+            else:
+                comparison = payload_data.get("pc_storage_movement_comparison")
+                if isinstance(comparison, dict) and comparison.get("status") == "baseline captured":
+                    status = "completed; movement baseline captured"
+                elif isinstance(comparison, dict) and comparison.get("movement_detected"):
+                    status = "completed; Pokemon movement detected"
+                elif isinstance(comparison, dict) and comparison.get("status") == "compared":
+                    status = "completed; compared with previous snapshot"
+                else:
+                    status = "completed"
+                anchor_record = payload_data.get("pc_storage_inspection_anchor_record")
+                if not isinstance(anchor_record, dict):
+                    status += "; no valid Pokemon at supplied address"
+                self.pc_storage_inspection_status_label.setText(status)
+            self._pc_inspection_requested_at = None
+            self._pc_inspection_requested_address = None
+        if is_search_result and search_request_matches:
+            if discovery_cancelled:
+                self.pc_storage_inspection_status_label.setText("cancelled")
+            elif inspection_error:
+                self.pc_storage_inspection_status_label.setText(
+                    f"failed: {inspection_error}"
+                )
+            else:
+                summary = payload_data.get("pc_storage_discovery_summary", {})
+                movement = payload_data.get("pc_storage_movement_comparison", {})
+                count = summary.get("non_party_match_count", 0) if isinstance(summary, dict) else 0
+                if isinstance(movement, dict) and movement.get("movement_detected"):
+                    self.pc_storage_inspection_status_label.setText(
+                        f"completed; matching Pokemon moved; {count} non-party match(es)"
+                    )
+                else:
+                    self.pc_storage_inspection_status_label.setText(
+                        f"completed; {count} non-party match(es)"
+                    )
+            self._pc_search_requested_at = None
+            self._pc_search_requested_address = None
+        if is_pointer_search_result and discovery_request_is_current:
+            pointer_error = payload_data.get("pc_storage_anchor_error")
+            if discovery_cancelled:
+                self.pc_storage_pointer_search_status_label.setText("cancelled")
+            elif pointer_error:
+                self.pc_storage_pointer_search_status_label.setText(
+                    f"failed: {pointer_error}"
+                )
+            else:
+                summary = payload_data.get("pc_storage_discovery_summary", {})
+                count = summary.get("reference_count", 0) if isinstance(summary, dict) else 0
+                self.pc_storage_pointer_search_status_label.setText(
+                    f"completed: {count} direct reference(s)"
+                )
+            self._pc_pointer_search_requested_at = None
+
+    def _pc_pokemon_search_lines(self, payload: dict) -> list[str]:
+        lines = ["", "Search RAM for This Pokemon:"]
+        identity = payload.get("pc_storage_search_identity")
+        if isinstance(identity, dict):
+            lines.append(
+                f"  Identity: {identity.get('nickname') or '--'}; "
+                f"PID={identity.get('pid', '--')}; checksum={identity.get('checksum', '--')}; "
+                f"species #{identity.get('species_id', '--')}"
+            )
+        summary = payload.get("pc_storage_discovery_summary", {})
+        if isinstance(summary, dict):
+            lines.append(
+                f"  Searched {summary.get('bytes_scanned', 0)} / "
+                f"{summary.get('total_bytes', 0)} bytes; "
+                f"matches={summary.get('match_count', 0)}; "
+                f"outside party={summary.get('non_party_match_count', 0)}"
+            )
+        matches = payload.get("pc_storage_search_matches")
+        names = _gen4_species_names()
+        if isinstance(matches, list) and matches:
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                species_id = _parse_optional_int(match.get("species_id"))
+                species = names.get(
+                    species_id, f"Unknown #{species_id if species_id is not None else '--'}"
+                )
+                lines.append(
+                    f"  {match.get('address', '--')}: {match.get('nickname') or species} "
+                    f"({species}, #{species_id if species_id is not None else '--'}); "
+                    f"checksum={match.get('checksum_valid', False)}; "
+                    f"party overlap={match.get('party_overlap', '--')} "
+                    f"(slot {match.get('party_slot', '--')})"
+                )
+        else:
+            lines.append("  No exact checksum-valid identity copies were found.")
+        movement = payload.get("pc_storage_movement_comparison")
+        if isinstance(movement, dict):
+            lines.append(
+                "  Movement: "
+                f"{movement.get('baseline_addresses', [])} -> "
+                f"{movement.get('current_addresses', [])}; "
+                f"detected={movement.get('movement_detected', False)}"
+            )
+            for candidate in movement.get("movement_candidates", [])[:16]:
+                lines.append(
+                    f"    {candidate.get('from_address', '--')} -> "
+                    f"{candidate.get('to_address', '--')} "
+                    f"delta={candidate.get('delta_bytes', '--')} bytes "
+                    f"({candidate.get('delta_hex', '--')}); "
+                    f"old/new checksum valid="
+                    f"{candidate.get('old_checksum_valid', False)}/"
+                    f"{candidate.get('new_checksum_valid', False)}; "
+                    f"party overlap={candidate.get('old_party_overlap', '--')}/"
+                    f"{candidate.get('new_party_overlap', '--')}"
+                )
+        return lines
+
+    def _pc_pokemon_inspection_lines(self, payload: dict) -> list[str]:
+        lines = ["", "Pokemon Anchor Inspection:"]
+        anchor = payload.get("pc_storage_inspection_anchor_address", "--")
+        record = payload.get("pc_storage_inspection_anchor_record")
+        if isinstance(record, dict):
+            species_id = _parse_optional_int(record.get("species_id"))
+            species_name = _gen4_species_names().get(
+                species_id, f"Unknown #{species_id if species_id is not None else '--'}"
+            )
+            lines.append(
+                f"  Anchor {anchor}: checksum-valid {record.get('nickname') or species_name} "
+                f"({species_name}, #{species_id if species_id is not None else '--'}); "
+                f"party overlap={record.get('party_overlap', '--')}; "
+                f"PID={record.get('pid', '--')}; stable ID={record.get('stable_id', '--')}"
+            )
+        else:
+            lines.append(
+                f"  No checksum-valid Pokemon record starts exactly at {anchor}; "
+                "the Main RAM identity search still ran."
+            )
+
+        nearby = payload.get("pc_storage_inspection_nearby_records")
+        if isinstance(nearby, list):
+            lines.extend(("  Nearby checksum-valid records (4-byte start alignment):",))
+            names = _gen4_species_names()
+            for item in nearby:
+                if not isinstance(item, dict):
+                    continue
+                species_id = _parse_optional_int(item.get("species_id"))
+                species_name = names.get(
+                    species_id, f"Unknown #{species_id if species_id is not None else '--'}"
+                )
+                lines.append(
+                    f"    {item.get('address', '--')} delta={item.get('delta_hex', '--')}: "
+                    f"{item.get('nickname') or species_name}/{species_name} "
+                    f"(#{species_id if species_id is not None else '--'}), "
+                    f"checksum={item.get('checksum_valid', False)}, "
+                    f"party overlap={item.get('party_overlap', '--')}, "
+                    f"delta%136={item.get('delta_multiple_of_136', False)}, "
+                    f"delta%236={item.get('delta_multiple_of_236', False)}"
+                )
+
+        spacing = payload.get("pc_storage_inspection_spacing_summary")
+        if isinstance(spacing, dict):
+            lines.append(
+                "  Repeated spacing: "
+                f"adjacent pairs={spacing.get('adjacent_record_pairs', 0)}, "
+                f"multiples of 136={spacing.get('pairs_multiple_of_136', 0)}, "
+                f"multiples of 236={spacing.get('pairs_multiple_of_236', 0)}"
+            )
+            for item in spacing.get("repeated_neighbor_spacings", [])[:16]:
+                lines.append(
+                    f"    {item.get('delta_bytes', '--')} bytes apart "
+                    f"({item.get('occurrences', 0)} adjacent pairs)"
+                )
+
+        copies = payload.get("pc_storage_discovery_identity_matches")
+        lines.append("  Copies matching the inspected Pokemon identity:")
+        if isinstance(copies, list) and copies:
+            names = _gen4_species_names()
+            for item in copies:
+                if not isinstance(item, dict):
+                    continue
+                species_id = _parse_optional_int(item.get("species_id"))
+                species_name = names.get(
+                    species_id, f"Unknown #{species_id if species_id is not None else '--'}"
+                )
+                lines.append(
+                    f"    {item.get('address', '--')} delta={item.get('delta_hex', '--')}: "
+                    f"{item.get('nickname') or '--'} / {species_name} "
+                    f"(#{species_id if species_id is not None else '--'}); "
+                    f"checksum={item.get('checksum_valid', False)}, "
+                    f"party overlap={item.get('party_overlap', '--')}, "
+                    f"same anchor identity={item.get('same_as_anchor_identity', '--')}"
+                )
+                for neighbor in item.get("surrounding_valid_pokemon", [])[:24]:
+                    neighbor_id = _parse_optional_int(neighbor.get("species_id"))
+                    neighbor_name = names.get(
+                        neighbor_id,
+                        f"Unknown #{neighbor_id if neighbor_id is not None else '--'}",
+                    )
+                    lines.append(
+                        f"      nearby {neighbor.get('address', '--')} "
+                        f"delta={neighbor.get('delta_hex', '--')}: "
+                        f"{neighbor.get('nickname') or neighbor_name}/{neighbor_name}; "
+                        f"party overlap={neighbor.get('party_overlap', '--')}"
+                    )
+                for reference in item.get("pointer_references", []):
+                    lines.append(
+                        f"      pointer {reference.get('reference_address', '--')} -> "
+                        f"{reference.get('target_address', '--')}"
+                    )
+        else:
+            lines.append("    No checksum-valid copies of the inspected identity were found.")
+
+        lines.append("  Direct pointers to supplied address and address - 4:")
+        anchor_references = payload.get("pc_storage_inspection_pointer_references")
+        if isinstance(anchor_references, list) and anchor_references:
+            for reference in anchor_references:
+                lines.append(
+                    f"    {reference.get('reference_address', '--')} -> "
+                    f"{reference.get('target_address', '--')} "
+                    f"({', '.join(reference.get('target', []))})"
+                )
+        else:
+            lines.append("    No direct 32-bit little-endian references found.")
+
+        lines.extend(("  Immediate bytes around the anchor:",))
+        adjacent_start = payload.get("pc_storage_inspection_adjacent_start", "--")
+        adjacent_hex = payload.get("pc_storage_inspection_adjacent_hex")
+        if isinstance(adjacent_hex, str):
+            try:
+                adjacent = bytes.fromhex(adjacent_hex)
+                start_address = _parse_optional_int(adjacent_start) or 0
+                for offset in range(0, len(adjacent), 16):
+                    lines.append(
+                        f"    0x{start_address + offset:08X}: "
+                        + adjacent[offset : offset + 16].hex(" ").upper()
+                    )
+            except ValueError:
+                lines.append("    Adjacent byte dump was malformed.")
+        for item in payload.get("pc_storage_inspection_adjacent_u32", []):
+            lines.append(
+                f"    u32 {item.get('relative_offset', '--')} "
+                f"{item.get('address', '--')} = {item.get('u32_le', '--')}"
+            )
+
+        comparison = payload.get("pc_storage_movement_comparison")
+        if isinstance(comparison, dict):
+            lines.extend(("  Movement experiment:", f"    Status: {comparison.get('status', '--')}"))
+            lines.append(f"    Stable ID: {comparison.get('stable_id') or '--'}")
+            if comparison.get("status") == "baseline captured":
+                lines.append(
+                    "    Baseline addresses: "
+                    + ", ".join(comparison.get("baseline_addresses", []))
+                )
+            else:
+                lines.append(
+                    "    Before: " + ", ".join(comparison.get("baseline_addresses", []))
+                )
+                lines.append(
+                    "    After: " + ", ".join(comparison.get("current_addresses", []))
+                )
+                for movement in comparison.get("movement_candidates", []):
+                    lines.append(
+                        f"    Move {movement.get('from_address', '--')} -> "
+                        f"{movement.get('to_address', '--')}: "
+                        f"{movement.get('delta_bytes', '--')} bytes "
+                        f"(136-stride={movement.get('delta_multiple_of_136', False)}, "
+                        f"236-stride={movement.get('delta_multiple_of_236', False)})"
+                    )
+                changes = comparison.get("changed_ram", {})
+                if isinstance(changes, dict):
+                    lines.append(
+                        f"    Changed RAM: {changes.get('changed_bytes', 0)} bytes in "
+                        f"{changes.get('changed_region_count', 0)} regions; "
+                        f"focus regions={changes.get('focus_region_count', 0)}"
+                    )
+                    for region in changes.get("focus_changed_regions", [])[:24]:
+                        lines.append(
+                            f"      {region.get('address_start', '--')}.."
+                            f"{region.get('address_end_exclusive', '--')}: "
+                            f"{region.get('changed_bytes', 0)} changed bytes"
+                        )
+
+        region_hex = payload.get("pc_storage_inspection_region_hex")
+        region_start = _parse_optional_int(
+            payload.get("pc_storage_inspection_region_start")
+        )
+        if isinstance(region_hex, str) and region_start is not None:
+            lines.append(
+                "  Raw anchor region "
+                f"{payload.get('pc_storage_inspection_region_start', '--')}.."
+                f"{payload.get('pc_storage_inspection_region_end_exclusive', '--')} "
+                f"({len(region_hex) // 2} bytes; 0x4000 before, 0x20000 after):"
+            )
+            try:
+                region = bytes.fromhex(region_hex)
+                for offset in range(0, len(region), 16):
+                    lines.append(
+                        f"    0x{region_start + offset:08X}: "
+                        + region[offset : offset + 16].hex(" ").upper()
+                    )
+            except ValueError:
+                lines.append("    Anchor region dump was malformed.")
+        return lines
+
+    def _refresh_pc_storage_discovery_progress(self, progress) -> None:
+        if not isinstance(progress, dict):
+            progress = {"status": "idle"}
+        status = progress.get("status", "idle")
+        active = status in {
+            "queued",
+            "scanning",
+            "stalled",
+            "retrying",
+            "analyzing",
+            "cancel-requested",
+        }
+        self.pc_storage_discovery_cancel_button.setEnabled(active)
+        if status in {"queued", "cancel-requested"}:
+            text = "cancelling..." if status == "cancel-requested" else "scanning 0%"
+        elif status == "scanning":
+            percent = progress.get("progress_percent", 0)
+            address = progress.get("current_address", "--")
+            if progress.get("mode") in {
+                "pokemon_search",
+                "structure_pointer_search",
+            }:
+                matches = progress.get("matches_found", 0)
+                elapsed = progress.get("elapsed_seconds", 0.0)
+                label = (
+                    "searching structure pointers"
+                    if progress.get("mode") == "structure_pointer_search"
+                    else "searching Pokemon identity"
+                )
+                text = (
+                    f"{label} {percent}% at {address}; "
+                    f"matches={matches}; elapsed={elapsed:.1f}s"
+                )
+                self.pc_storage_discovery_status_label.setText(text)
+                if progress.get("mode") == "structure_pointer_search":
+                    self.pc_storage_pointer_search_status_label.setText(text)
+                return
+            candidates = progress.get("candidates_found", 0)
+            elapsed = progress.get("elapsed_seconds", 0.0)
+            chunks_received = progress.get(
+                "received_chunk_count", progress.get("chunks_received", 0)
+            )
+            expected_chunks = progress.get("expected_chunk_count")
+            expected_text = (
+                expected_chunks
+                if expected_chunks is not None
+                else f"~{progress.get('estimated_chunk_count')}"
+                if progress.get("estimated_chunk_count") is not None
+                else "?"
+            )
+            missing_count = progress.get("missing_chunk_count", 0)
+            text = (
+                f"scanning {percent}% at {address}; chunks received: {chunks_received}/"
+                f"{expected_text}; proven missing: {missing_count}; "
+                f"candidates={candidates}; elapsed={elapsed:.1f}s"
+            )
+            if progress.get("producer_status") == "stalled":
+                text += "; waiting for producer..."
+        elif status == "stalled":
+            percent = progress.get("progress_percent", 0)
+            chunks_received = progress.get(
+                "received_chunk_count", progress.get("chunks_received", 0)
+            )
+            missing_count = progress.get("missing_chunk_count", 0)
+            text = (
+                f"scanning {percent}%; chunks received: {chunks_received}; "
+                f"proven missing: {missing_count}; waiting for producer..."
+            )
+        elif status == "retrying":
+            percent = progress.get("progress_percent", 0)
+            missing = progress.get("missing_chunk_index", "?")
+            chunks_received = progress.get(
+                "received_chunk_count", progress.get("chunks_received", 0)
+            )
+            expected_chunks = progress.get("expected_chunk_count")
+            expected_text = (
+                expected_chunks
+                if expected_chunks is not None
+                else f"~{progress.get('estimated_chunk_count')}"
+                if progress.get("estimated_chunk_count") is not None
+                else "?"
+            )
+            missing_count = progress.get("missing_chunk_count", 1)
+            text = (
+                f"scanning {percent}%; chunks received: {chunks_received}/{expected_text}; "
+                f"proven missing: {missing_count}; retrying chunk {missing}..."
+            )
+        elif status == "analyzing":
+            text = f"scanning 100%; candidates={progress.get('candidates_found', 0)}; analyzing..."
+        elif status == "completed":
+            elapsed = progress.get("elapsed_seconds", 0.0)
+            text = f"completed in {elapsed:.1f}s"
+        elif status == "cancelled":
+            text = "cancelled"
+        elif status == "failed":
+            text = f"failed: {progress.get('error') or 'discovery failed'}"
+        else:
+            text = "idle"
+        self.pc_storage_discovery_status_label.setText(text)
+
+    def _pc_storage_anchor_diagnostic_lines(self, diagnostic: dict) -> list[str]:
+        lines = [
+            f"  Record address: {diagnostic.get('anchor_address', '--')}",
+            (
+                f"  Record RAM valid: {diagnostic.get('record_address_ram_valid', False)}; "
+                f"checksum valid: {diagnostic.get('record_checksum_valid', False)}; "
+                f"species ID: {diagnostic.get('species_id', '--')}"
+            ),
+            (
+                f"  Candidate PCBoxes header (-0x28): "
+                f"{diagnostic.get('candidate_pc_boxes_base', '--')} "
+                f"(RAM valid={diagnostic.get('candidate_pc_boxes_base_ram_valid', False)})"
+            ),
+            f"  Full 540-slot region fits RAM: {diagnostic.get('full_540_slot_region_fits_ram', False)}",
+            f"  Runtime base to anchor delta: {diagnostic.get('runtime_base_to_anchor_delta', '--')}",
+            (
+                f"  Party buffer: records={diagnostic.get('party_records_address', '--')}, "
+                f"count={diagnostic.get('party_count', '--')}, "
+                f"anchor matches party slot={diagnostic.get('party_record_slot', '--')} "
+                f"({diagnostic.get('matches_party_record', False)})"
+            ),
+            (
+                f"  Bytes around anchor, starting {diagnostic.get('nearby_dump_start', '--')}: "
+                f"{diagnostic.get('bytes_before_and_at_record_address') or '--'}"
+            ),
+        ]
+        lines.append(
+            f"  Proposed header bytes at {diagnostic.get('header_address', '--')} "
+            f"({diagnostic.get('header_byte_count', 0)} bytes; interpretation not assumed):"
+        )
+        header_hex = diagnostic.get("header_bytes_hex")
+        if isinstance(header_hex, str) and header_hex:
+            lines.append(f"    {header_hex}")
+        header_values = diagnostic.get("header_u32_le_values")
+        if isinstance(header_values, list):
+            lines.append("  Header u32 LE words:")
+            for item in header_values:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"    +{item.get('relative_offset', '--')} "
+                        f"{item.get('address', '--')} = {item.get('u32_le', '--')}"
+                    )
+        relative_values = diagnostic.get("relative_u32_values")
+        if isinstance(relative_values, list) and relative_values:
+            lines.append("  Nearby u32 LE values:")
+            for item in relative_values:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"    {item.get('relative_offset', '--')} "
+                        f"{item.get('address', '--')} = {item.get('u32_le', '--')}"
+                    )
+
+        candidate = diagnostic.get("pcboxes_candidate")
+        if isinstance(candidate, dict):
+            lines.append(
+                "  540-slot layout from anchor: "
+                f"valid={candidate.get('valid_occupied_records', '--')}, "
+                f"empty={candidate.get('empty_records', '--')}, "
+                f"invalid={candidate.get('invalid_records', '--')}; "
+                f"record size={candidate.get('record_size', '--')} bytes"
+            )
+            samples = candidate.get("sample_records")
+            if isinstance(samples, list) and samples:
+                lines.append("  Decoded occupied Pokemon from the anchored layout:")
+                for sample in samples[:6]:
+                    lines.append("    " + self._pc_storage_discovery_sample_text(sample))
+        occupied = diagnostic.get("occupied_slots")
+        if isinstance(occupied, list):
+            lines.append(f"  All occupied slots ({len(occupied)}):")
+            names = _gen4_species_names()
+            for item in occupied:
+                if not isinstance(item, dict):
+                    continue
+                species_id = _parse_optional_int(item.get("species_id"))
+                species = names.get(
+                    species_id,
+                    f"Unknown #{species_id if species_id is not None else '--'}",
+                )
+                lines.append(
+                    f"    Box {item.get('box', '--')} Slot {item.get('slot', '--')} "
+                    f"{item.get('address', '--')}: {item.get('nickname') or species} "
+                    f"({species}, #{species_id if species_id is not None else '--'})"
+                )
+        key_checks = diagnostic.get("key_position_checks")
+        if isinstance(key_checks, list):
+            lines.append("  Requested position checks:")
+            names = _gen4_species_names()
+            for item in key_checks:
+                if not isinstance(item, dict):
+                    continue
+                species_id = _parse_optional_int(item.get("species_id"))
+                species = names.get(species_id, "empty/invalid") if species_id else "empty/invalid"
+                identity = item.get("nickname") or species
+                lines.append(
+                    f"    Box {item.get('box', '--')} Slot {item.get('slot', '--')} "
+                    f"{item.get('address', '--')}: status={item.get('status', '--')}, "
+                    f"{identity}"
+                )
+        invalid_slots = diagnostic.get("invalid_slots")
+        if isinstance(invalid_slots, list):
+            lines.append(f"  Malformed slot addresses ({len(invalid_slots)}):")
+            for item in invalid_slots:
+                if isinstance(item, dict):
+                    lines.append(
+                        f"    Box {item.get('box', '--')} Slot {item.get('slot', '--')} "
+                        f"{item.get('address', '--')}"
+                    )
+        else:
+            lines.append("  A complete anchored layout could not be evaluated.")
+
+        references = diagnostic.get("pointer_references")
+        if isinstance(references, list):
+            lines.append(f"  Direct RAM references to candidate addresses: {len(references)}")
+            for reference in references[:32]:
+                if isinstance(reference, dict):
+                    lines.append(
+                        f"    {reference.get('reference_address', '--')} -> "
+                        f"{reference.get('target_address', '--')} "
+                        f"({reference.get('target', '--')}; "
+                        f"runtime-base offset={reference.get('runtime_base_relative_offset', '--')})"
+                    )
+        return lines
+
+    def _pc_structure_pointer_search_lines(self, payload: dict) -> list[str]:
+        summary = payload.get("pc_storage_discovery_summary", {})
+        lines = [
+            "",
+            "PC Structure Pointer References:",
+            f"  Candidate header: {payload.get('pc_storage_pointer_search_header_address', '--')}",
+            f"  First BoxPokemon: {payload.get('pc_storage_pointer_search_first_record_address', '--')}",
+        ]
+        if isinstance(summary, dict):
+            lines.append(
+                f"  Searched {summary.get('bytes_scanned', 0)} / "
+                f"{summary.get('total_bytes', 0)} bytes; direct references="
+                f"{summary.get('reference_count', 0)}"
+            )
+            runtime_base = summary.get("runtime_base_address")
+            lines.append(
+                f"  Party-reader pointer slot {summary.get('runtime_pointer_slot', '--')} "
+                f"-> runtime base {runtime_base or 'unavailable'}"
+            )
+            for label, key in (
+                ("header", "header_offset_from_runtime_base"),
+                ("first record", "first_record_offset_from_runtime_base"),
+            ):
+                offset = summary.get(key)
+                if isinstance(offset, int):
+                    lines.append(f"  Candidate {label} delta from runtime base: {offset:+#x}")
+            if summary.get("references_truncated"):
+                lines.append("  Reference list was capped; reported addresses are incomplete.")
+            if summary.get("error"):
+                lines.append(f"  Search error: {summary['error']}")
+        references = payload.get("pc_storage_pointer_references")
+        if isinstance(references, list) and references:
+            for reference in references:
+                if isinstance(reference, dict):
+                    lines.append(
+                        f"  {reference.get('reference_address', '--')} -> "
+                        f"{reference.get('target_address', '--')} "
+                        f"({reference.get('target', '--')})"
+                    )
+        else:
+            lines.append("  No direct 32-bit references were found.")
+        return lines
+
+    def _pc_storage_discovery_candidate_lines(self, candidate) -> list[str]:
+        if not isinstance(candidate, dict):
+            return []
+        lines = [
+            (
+                "  "
+                f"Rank {candidate.get('rank', '--')}: "
+                f"PCBoxes={candidate.get('candidate_pc_boxes_base', '--')}, "
+                f"first BoxPokemon={candidate.get('first_box_pokemon_address', '--')}, "
+                f"valid={candidate.get('valid_occupied_records', '--')}, "
+                f"empty={candidate.get('empty_records', '--')}, "
+                f"invalid={candidate.get('invalid_records', '--')}, "
+                f"party-overlap={candidate.get('party_record_overlaps', '--')}, "
+                f"score={candidate.get('confidence_score', '--')}"
+            )
+        ]
+        reasons = candidate.get("reasons")
+        if isinstance(reasons, list) and reasons:
+            lines.append("    Reasons: " + "; ".join(str(reason) for reason in reasons))
+        samples = candidate.get("sample_records")
+        if isinstance(samples, list) and samples:
+            lines.append("    Recognized records:")
+            for sample in samples[:6]:
+                lines.append("      " + self._pc_storage_discovery_sample_text(sample))
+        return lines
+
+    def _pc_storage_discovery_sample_text(self, sample) -> str:
+        if not isinstance(sample, dict):
+            return "--"
+        species_id = _parse_optional_int(sample.get("species_id"))
+        species_name = _gen4_species_names().get(species_id, f"Unknown #{species_id}")
+        nickname = None
+        raw_hex = sample.get("raw_hex")
+        address = _parse_optional_int(sample.get("address"))
+        if isinstance(raw_hex, str):
+            try:
+                raw = bytes.fromhex(raw_hex)
+                if len(raw) == BOX_POKEMON_SIZE:
+                    decoded = decode_box_pokemon(raw, address)
+                    species_id = decoded.species_id
+                    species_name = _gen4_species_names().get(
+                        species_id, f"Unknown #{species_id}"
+                    )
+                    nickname = decoded.nickname
+            except ValueError:
+                nickname = None
+        return (
+            f"Box {sample.get('box', '--')} Slot {sample.get('slot', '--')} "
+            f"at {sample.get('address', '--')}: "
+            f"{species_name} (#{species_id if species_id is not None else '--'}), "
+            f"nickname={nickname or species_name}"
+        )
+
+    def _set_pc_storage_debug_text(self, text: str) -> None:
+        editor = self.pc_storage_details
+        self._set_plain_text_preserving_scroll(editor, text)
+
+    def _set_pc_storage_discovery_text(self, text: str) -> None:
+        editor = self.pc_storage_discovery_details
+        self._set_plain_text_preserving_scroll(editor, text)
+
+    def _set_plain_text_preserving_scroll(self, editor: QPlainTextEdit, text: str) -> None:
+        if text == editor.toPlainText():
+            return
+        vertical = editor.verticalScrollBar()
+        horizontal = editor.horizontalScrollBar()
+        vertical_position = vertical.value()
+        was_at_bottom = vertical.maximum() > 0 and vertical_position >= vertical.maximum()
+        horizontal_position = horizontal.value()
+        editor.setPlainText(text)
+        vertical = editor.verticalScrollBar()
+        horizontal = editor.horizontalScrollBar()
+        vertical.setValue(vertical.maximum() if was_at_bottom else vertical_position)
+        horizontal.setValue(horizontal_position)
 
     def _friendship_walk_transport_debug_lines(self, party_payload, ram_fresh: bool) -> list[str]:
         now = time.monotonic()

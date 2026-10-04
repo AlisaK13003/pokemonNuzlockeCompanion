@@ -1,4 +1,4 @@
-"""Decode individual Generation IV party Pokemon records."""
+"""Decode party and boxed Generation IV Pokemon records."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from pokemon_ev_tracker.pokemon.gen4.ivs import IndividualValues, decode_individ
 from pokemon_ev_tracker.pokemon.gen4.nature import nature_from_pid
 
 PARTY_POKEMON_SIZE = 236
+BOX_POKEMON_SIZE = 0x88
 POKEMON_HEADER_SIZE = 0x08
 HELD_ITEM_BOX_DATA_OFFSET = 0x02
 HELD_ITEM_RECORD_OFFSET = POKEMON_HEADER_SIZE + HELD_ITEM_BOX_DATA_OFFSET
@@ -181,6 +182,27 @@ class DecodedPokemon:
     diagnostics: PokemonDiagnostics
 
 
+@dataclass(frozen=True)
+class DecodedBoxPokemon:
+    species_id: int
+    nickname: str | None
+    nickname_diagnostics: NicknameDiagnostics
+    met_location_id: int
+    met_location_dp_id: int
+    egg_location_id: int
+    origin_game: int
+    met_level: int | None
+    is_egg: bool
+    stable_id: str
+    pid: int
+    checksum: int
+    calculated_checksum: int
+    checksum_valid: bool
+    address: int | None
+    shuffle_index: int
+    block_order: str
+
+
 def decode_party_pokemon(
     data: bytes,
     address: int | None = None,
@@ -316,6 +338,60 @@ def decode_party_pokemon(
             battle_stats_valid=battle_stats_error is None,
             battle_stats_error=battle_stats_error,
         ),
+    )
+
+
+def decode_box_pokemon(data: bytes, address: int | None = None) -> DecodedBoxPokemon:
+    """Decode the shared encrypted PK4 box portion without party-only stats."""
+    if len(data) < BOX_POKEMON_SIZE:
+        raise ValueError("Box Pokemon record must be 136 bytes.")
+
+    pid = int.from_bytes(data[0x00:0x04], "little")
+    checksum = int.from_bytes(data[0x06:0x08], "little")
+    decrypted = decrypt_box_data(data[0x08:BOX_POKEMON_SIZE], pid, checksum)
+    calculated_checksum = calculate_checksum(decrypted)
+    ivs = decode_individual_values(
+        int.from_bytes(decrypted[IVS_BOX_DATA_OFFSET : IVS_BOX_DATA_OFFSET + 4], "little")
+    )
+    nickname_raw = decrypted[
+        NICKNAME_BOX_DATA_OFFSET : NICKNAME_BOX_DATA_OFFSET + NICKNAME_FIELD_SIZE
+    ]
+    nickname = _decode_nickname(nickname_raw, address)
+    trainer_id = int.from_bytes(decrypted[0x04:0x06], "little")
+    secret_id = int.from_bytes(decrypted[0x06:0x08], "little")
+    met_level_value = decrypted[MET_LEVEL_BOX_DATA_OFFSET] & 0x7F
+
+    return DecodedBoxPokemon(
+        species_id=int.from_bytes(decrypted[0x00:0x02], "little"),
+        nickname=nickname.decoded_string,
+        nickname_diagnostics=nickname,
+        met_location_id=int.from_bytes(
+            decrypted[
+                MET_LOCATION_EXTENDED_BOX_DATA_OFFSET : MET_LOCATION_EXTENDED_BOX_DATA_OFFSET + 2
+            ],
+            "little",
+        ),
+        met_location_dp_id=int.from_bytes(
+            decrypted[MET_LOCATION_DP_BOX_DATA_OFFSET : MET_LOCATION_DP_BOX_DATA_OFFSET + 2],
+            "little",
+        ),
+        egg_location_id=int.from_bytes(
+            decrypted[
+                EGG_LOCATION_EXTENDED_BOX_DATA_OFFSET : EGG_LOCATION_EXTENDED_BOX_DATA_OFFSET + 2
+            ],
+            "little",
+        ),
+        origin_game=decrypted[ORIGIN_GAME_BOX_DATA_OFFSET],
+        met_level=met_level_value or None,
+        is_egg=ivs.is_egg,
+        stable_id=f"pid:{pid:08X}:ot:{trainer_id:04X}:{secret_id:04X}",
+        pid=pid,
+        checksum=checksum,
+        calculated_checksum=calculated_checksum,
+        checksum_valid=calculated_checksum == checksum,
+        address=address,
+        shuffle_index=shuffle_index(pid),
+        block_order=block_order(pid),
     )
 
 

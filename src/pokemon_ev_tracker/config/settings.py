@@ -29,6 +29,8 @@ class AppSettings:
     compact_mode: bool = False
     tracker_view: str = "training"
     friendship_walk_axis: str = "horizontal"
+    pc_box1_species_id: int = 415
+    pc_box1_nickname: str = "mitsu"
     window_geometry: tuple[int, int, int, int] | None = None
     normal_window_geometry: tuple[int, int, int, int] | None = None
 
@@ -44,6 +46,14 @@ class AppSettings:
             "vertical",
         }:
             self.friendship_walk_axis = "horizontal"
+        if type(self.pc_box1_species_id) is not int or not 1 <= self.pc_box1_species_id <= 493:
+            self.pc_box1_species_id = 415
+        if not isinstance(self.pc_box1_nickname, str) or (
+            len(self.pc_box1_nickname) > 10
+            or any(ord(character) < 0x20 or ord(character) > 0x7E
+                   for character in self.pc_box1_nickname)
+        ):
+            self.pc_box1_nickname = ""
         self.window_geometry = _normalize_window_geometry(self.window_geometry)
         self.normal_window_geometry = _normalize_window_geometry(self.normal_window_geometry)
 
@@ -85,6 +95,8 @@ class AppSettings:
             compact_mode=data.get("compact_mode", False),
             tracker_view=data.get("tracker_view", "training"),
             friendship_walk_axis=data.get("friendship_walk_axis", "horizontal"),
+            pc_box1_species_id=data.get("pc_box1_species_id", 415),
+            pc_box1_nickname=data.get("pc_box1_nickname", "mitsu"),
             window_geometry=data.get("window_geometry"),
             normal_window_geometry=data.get("normal_window_geometry"),
         )

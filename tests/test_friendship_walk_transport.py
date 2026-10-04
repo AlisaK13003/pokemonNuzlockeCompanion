@@ -123,11 +123,11 @@ def test_datasource_snapshot_exposes_canonical_player_position() -> None:
 def test_lua_walk_watchdog_and_ack_use_consistent_wall_clock_and_sequences() -> None:
     script = Path("bizhawk/ev_tracker.lua").read_text(encoding="utf-8")
 
-    assert 'friendship_walk.last_command_time = os.time()' in script
-    assert 'friendship_walk.last_command_time = os.clock()' not in script
+    assert 'CoordinateState.friendship_walk.last_command_time = os.time()' in script
+    assert 'CoordinateState.friendship_walk.last_command_time = os.clock()' not in script
     assert 'line:match("^WALK|(%d+)|START|(horizontal)$")' in script
-    assert '{"friendship_walk_ack_sequence", friendship_walk.ack_sequence}' in script
-    assert '{"friendship_walk_ack_frame", friendship_walk.ack_frame}' in script
+    assert '{"friendship_walk_ack_sequence", CoordinateState.friendship_walk.ack_sequence}' in script
+    assert '{"friendship_walk_ack_frame", CoordinateState.friendship_walk.ack_frame}' in script
     assert "joypad.getimmediate" not in script
     assert "user_holds_direction" not in script
     assert 'joypad.set({Up = false, Down = false, Left = false, Right = false, B = false})' in script
@@ -137,6 +137,6 @@ def test_lua_walk_watchdog_and_ack_use_consistent_wall_clock_and_sequences() -> 
     assert 'Down = direction == "Down"' in script
     assert 'B = true' in script
     assert 'local WALK_REVERSAL_GRACE_FRAMES = 8' in script
-    assert 'friendship_walk.pending_direction = walk_direction' in script
-    assert 'frame >= (friendship_walk.reversal_until_frame or frame)' in script
-    assert 'friendship_walk.b_injected = true' in script
+    assert 'CoordinateState.friendship_walk.pending_direction = walk_direction' in script
+    assert 'frame >= (CoordinateState.friendship_walk.reversal_until_frame or frame)' in script
+    assert 'CoordinateState.friendship_walk.b_injected = true' in script

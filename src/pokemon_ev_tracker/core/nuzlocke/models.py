@@ -116,6 +116,7 @@ class PokemonAcquisitionEvent:
     confidence: str
     suggested_location_id: str | None = None
     suggested_location_name: str | None = None
+    source_location: str = "PARTY"
 
 
 @dataclass

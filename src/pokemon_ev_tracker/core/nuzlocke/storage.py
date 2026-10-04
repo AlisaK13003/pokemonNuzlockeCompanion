@@ -622,6 +622,7 @@ def _deserialize_run(raw: dict) -> NuzlockeRun:
                         if raw_event.get("suggested_location_name")
                         else None
                     ),
+                    source_location=str(raw_event.get("source_location", "PARTY")),
                 )
             )
     return NuzlockeRun(

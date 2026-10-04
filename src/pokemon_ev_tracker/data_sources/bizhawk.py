@@ -13,6 +13,11 @@ from pokemon_ev_tracker.games.platinum.battle import (
     decode_battle_battlers,
 )
 from pokemon_ev_tracker.games.platinum.decoder import PartyState, valid_checksum_count
+from pokemon_ev_tracker.games.platinum.pc_storage import (
+    BoxedPokemon,
+    PCStorageState,
+    decode_pc_storage_payload,
+)
 from pokemon_ev_tracker.games.platinum.player_position import decode_player_position
 from pokemon_ev_tracker.games.platinum.profile import PLATINUM_PROFILE
 from pokemon_ev_tracker.transport.bizhawk_server import (
@@ -30,6 +35,18 @@ class CoordinateCaptureRequest:
     reason: str | None = None
 
 
+def _boxed_monitor_identity(mon: BoxedPokemon) -> dict[str, object]:
+    return {
+        "stable_id": mon.stable_id,
+        "box": mon.box_index,
+        "slot": mon.slot_index,
+        "species": mon.species_name,
+        "nickname": mon.decoded.nickname,
+        "pid": f"0x{mon.decoded.pid:08X}",
+        "checksum": f"0x{mon.decoded.checksum:04X}",
+    }
+
+
 class BizHawkRamDataSource(GameDataSource):
     """Receives RAM-1 heartbeat messages from the EmuHawk Lua script."""
 
@@ -40,6 +57,17 @@ class BizHawkRamDataSource(GameDataSource):
         self._last_good_party_by_pid = {}
         self._battle_payload_cache = object()
         self._battle_battlers_cache: tuple[BattleBattler, ...] = ()
+        self._pc_storage_payload_cache = object()
+        self._pc_storage_state_cache: PCStorageState | None = None
+        self._pc_storage_stabilizer_payload = object()
+        self._pc_storage_stable_pokemon: tuple[BoxedPokemon, ...] = ()
+        self._pc_storage_changes: tuple[BoxedPokemon, ...] = ()
+        self._pc_storage_stream_identity = None
+        self._pc_storage_last_frame: int | None = None
+        self._pc_storage_stable_ids: set[str] = set()
+        self._pc_storage_sightings: dict[str, tuple[int, int | None]] = {}
+        self._pc_storage_last_occupied: dict[str, BoxedPokemon] = {}
+        self._pc_storage_monitor_debug: dict[str, object] = {"status": "waiting"}
 
     @property
     def backend_name(self) -> str:
@@ -117,15 +145,220 @@ class BizHawkRamDataSource(GameDataSource):
         )
         return self.server.send_friendship_walk_command("STOP", transport=transports)
 
+    def request_pc_storage_scan(self) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        return self.server.request_pc_storage_scan(transport=transports)
+
+    def request_pc_save_offset_test(
+        self,
+        save_ram_directory: str | None = None,
+        *,
+        expected_nickname: str | None = None,
+        expected_species_id: int | None = None,
+    ) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        request = getattr(self.server, "request_pc_save_offset_test", None)
+        return bool(
+            callable(request)
+            and request(
+                transport=transports,
+                save_ram_directory=save_ram_directory,
+                expected_nickname=expected_nickname,
+                expected_species_id=expected_species_id,
+            )
+        )
+
+    def request_pc_sram_pokemon_search(
+        self, expected_nickname: str, expected_species_id: int
+    ) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        request = getattr(self.server, "request_pc_sram_pokemon_search", None)
+        return bool(
+            callable(request)
+            and request(
+                expected_nickname,
+                expected_species_id,
+                transport=transports,
+            )
+        )
+
+    def request_pc_storage_discovery(self, anchor_address: int | None = None) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        return self.server.request_pc_storage_discovery(
+            transport=transports,
+            anchor_address=anchor_address,
+        )
+
+    def request_pc_storage_session_layout_discovery(
+        self, species_id: int, nickname: str | None
+    ) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        request = getattr(
+            self.server, "request_pc_storage_session_layout_discovery", None
+        )
+        lua_run_id = (
+            party_payload.payload.get("run_id")
+            if party_payload is not None and isinstance(party_payload.payload, dict)
+            else None
+        )
+        return bool(
+            callable(request)
+            and request(
+                species_id, nickname, transport=transports, lua_run_id=lua_run_id
+            )
+        )
+
+    def retry_pc_storage_session_cache_install(self) -> bool:
+        request = getattr(self.server, "retry_session_pc_cache_install", None)
+        return bool(callable(request) and request())
+
+    def reset_pc_discovery_for_lua_run(self, lua_run_id: str) -> None:
+        self.server.reset_pc_discovery_for_lua_run(lua_run_id)
+
+    def request_pc_pokemon_inspection(self, anchor_address: int) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        request = getattr(self.server, "request_pc_pokemon_inspection", None)
+        return bool(
+            callable(request)
+            and request(anchor_address, transport=transports)
+        )
+
+    def request_pc_pokemon_search(self) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        request = getattr(self.server, "request_pc_pokemon_search", None)
+        return bool(callable(request) and request(transport=transports))
+
+    def request_pc_structure_pointer_search(
+        self, header_address: int, first_record_address: int
+    ) -> bool:
+        party_payload = self.server.latest_party_payload()
+        source = getattr(party_payload, "source", None)
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        request = getattr(self.server, "request_pc_structure_pointer_search", None)
+        return bool(
+            callable(request)
+            and request(
+                header_address,
+                first_record_address,
+                transport=transports,
+            )
+        )
+
+    def reset_pc_pokemon_inspection_baseline(self) -> None:
+        reset = getattr(self.server, "reset_pc_pokemon_inspection_baseline", None)
+        if callable(reset):
+            reset()
+
+    def request_pc_storage_discovery_cancel(self) -> bool:
+        progress_reader = getattr(self.server, "pc_storage_discovery_progress", None)
+        progress = progress_reader() if callable(progress_reader) else {}
+        source = progress.get("source")
+        transports = (
+            (source, "file" if source == "tcp" else "tcp")
+            if source in {"tcp", "file"}
+            else ("tcp", "file")
+        )
+        request = getattr(self.server, "request_pc_storage_discovery_cancel", None)
+        return bool(callable(request) and request(transport=transports))
+
     def snapshot(self) -> DataSourceSnapshot:
         heartbeat = self.server.latest_heartbeat()
         party_payload = self.server.latest_party_payload()
+        latest_pc_storage = getattr(self.server, "latest_pc_storage_payload", None)
+        pc_storage_payload = latest_pc_storage() if callable(latest_pc_storage) else None
+        latest_pc_discovery = getattr(self.server, "latest_pc_storage_discovery_payload", None)
+        pc_storage_discovery_payload = (
+            latest_pc_discovery() if callable(latest_pc_discovery) else None
+        )
+        latest_pc_discovery_progress = getattr(
+            self.server, "pc_storage_discovery_progress", None
+        )
+        pc_storage_discovery_progress = (
+            latest_pc_discovery_progress()
+            if callable(latest_pc_discovery_progress)
+            else {"status": "idle"}
+        )
+        latest_save_test = getattr(
+            self.server, "latest_pc_save_offset_test_payload", None
+        )
+        pc_save_offset_test_payload = (
+            latest_save_test() if callable(latest_save_test) else None
+        )
+        save_test_status_reader = getattr(
+            self.server, "pc_save_offset_test_status", None
+        )
+        pc_save_offset_test_status = (
+            save_test_status_reader()
+            if callable(save_test_status_reader)
+            else {"status": "idle"}
+        )
+        latest_sram_search = getattr(self.server, "latest_pc_sram_search_payload", None)
+        pc_sram_search_payload = (
+            latest_sram_search() if callable(latest_sram_search) else None
+        )
+        sram_search_status_reader = getattr(self.server, "pc_sram_search_status", None)
+        pc_sram_search_status = (
+            sram_search_status_reader()
+            if callable(sram_search_status_reader)
+            else {"status": "idle"}
+        )
         party_state = self._decode_party_payload(party_payload)
         display_party_state = self._stabilize_display_party(party_state, party_payload)
         battle_battlers = self._decode_battle_battlers(party_payload)
+        pc_storage_state = self._decode_pc_storage_payload(pc_storage_payload)
         payload = party_payload.payload if party_payload is not None else {}
         player_position = decode_player_position(payload)
         party_payload_fresh = self._party_payload_is_fresh(party_payload)
+        pc_storage_payload_fresh = self._pc_storage_payload_is_fresh(pc_storage_payload)
+        stable_boxed_pokemon = self._stabilize_pc_storage_payload(
+            pc_storage_state, pc_storage_payload
+        )
         active_enemies = active_enemy_battlers(battle_battlers) if party_payload_fresh else ()
         enemy_summary = (
             ", ".join(f"{battler.species} Lv{battler.level}" for battler in active_enemies)
@@ -151,6 +384,18 @@ class BizHawkRamDataSource(GameDataSource):
                 "fallback_file": str(self.server.fallback_file),
                 "heartbeat": heartbeat,
                 "party_payload": party_payload,
+                "pc_storage_payload": pc_storage_payload,
+                "pc_storage_discovery_payload": pc_storage_discovery_payload,
+                "pc_storage_discovery_progress": pc_storage_discovery_progress,
+                "pc_save_offset_test_payload": pc_save_offset_test_payload,
+                "pc_save_offset_test_status": pc_save_offset_test_status,
+                "pc_sram_search_payload": pc_sram_search_payload,
+                "pc_sram_search_status": pc_sram_search_status,
+                "pc_storage_payload_fresh": pc_storage_payload_fresh,
+                "pc_storage_state": pc_storage_state,
+                "pc_storage_stable_pokemon": stable_boxed_pokemon,
+                "pc_storage_changes": self._pc_storage_changes,
+                "pc_storage_monitor_debug": self._pc_storage_monitor_debug,
                 "party_payload_fresh": party_payload_fresh,
                 "party_state": party_state,
                 "display_party_state": display_party_state,
@@ -191,6 +436,144 @@ class BizHawkRamDataSource(GameDataSource):
             return False
         stale_after = getattr(self.server, "stale_after_seconds", 5.0)
         return max(0.0, time.monotonic() - received_at) <= stale_after
+
+    def _pc_storage_payload_is_fresh(self, pc_storage_payload) -> bool:
+        if pc_storage_payload is None:
+            return False
+        received_at = getattr(pc_storage_payload, "received_at", None)
+        if not isinstance(received_at, (int, float)):
+            return False
+        stale_after = getattr(self.server, "stale_after_seconds", 5.0)
+        return max(0.0, time.monotonic() - received_at) <= stale_after
+
+    def _decode_pc_storage_payload(self, pc_storage_payload) -> PCStorageState | None:
+        if pc_storage_payload is self._pc_storage_payload_cache:
+            return self._pc_storage_state_cache
+        self._pc_storage_payload_cache = pc_storage_payload
+        payload = pc_storage_payload.payload if pc_storage_payload is not None else None
+        self._pc_storage_state_cache = decode_pc_storage_payload(payload)
+        return self._pc_storage_state_cache
+
+    def _stabilize_pc_storage_payload(
+        self, state: PCStorageState | None, pc_storage_payload
+    ) -> tuple[BoxedPokemon, ...]:
+        if pc_storage_payload is self._pc_storage_stabilizer_payload:
+            return self._pc_storage_stable_pokemon
+        self._pc_storage_stabilizer_payload = pc_storage_payload
+        self._pc_storage_changes = ()
+        if state is None or not state.available:
+            self._pc_storage_sightings.clear()
+            self._pc_storage_stable_pokemon = ()
+            self._pc_storage_monitor_debug = {
+                "status": "invalid",
+                "reason": getattr(state, "error", None) or "No validated PC snapshot",
+                "previous": [
+                    _boxed_monitor_identity(mon)
+                    for mon in self._pc_storage_last_occupied.values()
+                ],
+                "current": [],
+                "added": [],
+                "removed": [],
+                "stable_new": [],
+            }
+            return self._pc_storage_stable_pokemon
+
+        payload = pc_storage_payload.payload if pc_storage_payload is not None else {}
+        stream_identity = (
+            (payload.get("lua_run_id") or payload.get("run_id"),
+             payload.get("rom_session_identity"))
+            if payload.get("pc_storage_resolver_kind") == "session_pc_cache"
+            else (payload.get("run_id"), state.save_data_pointer)
+        )
+        current = {mon.stable_id: mon for mon in state.valid_pokemon}
+        if stream_identity != self._pc_storage_stream_identity:
+            self._pc_storage_stream_identity = stream_identity
+            self._pc_storage_stable_ids = set(current)
+            self._pc_storage_sightings.clear()
+            self._pc_storage_last_frame = state.scan_frame
+            self._pc_storage_stable_pokemon = state.valid_pokemon
+            self._pc_storage_last_occupied = current
+            self._pc_storage_monitor_debug = {
+                "status": "baseline",
+                "frame": state.scan_frame,
+                "stream_identity": stream_identity,
+                "previous": [],
+                "current": [_boxed_monitor_identity(mon) for mon in current.values()],
+                "added": [],
+                "removed": [],
+                "stable_new": [],
+                "reason": "First validated PC snapshot for this Lua/ROM session",
+            }
+            LOGGER.info(
+                "PC monitor baseline: frame=%s stream=%s occupied=%s",
+                state.scan_frame, stream_identity, sorted(current),
+            )
+            return self._pc_storage_stable_pokemon
+
+        if state.scan_frame == self._pc_storage_last_frame:
+            return self._pc_storage_stable_pokemon
+
+        previous_occupied = self._pc_storage_last_occupied
+        added_ids = current.keys() - previous_occupied.keys()
+        removed_ids = previous_occupied.keys() - current.keys()
+        previous_sightings = self._pc_storage_sightings
+        current_sightings: dict[str, tuple[int, int | None]] = {}
+        stable: dict[str, BoxedPokemon] = {}
+        changes = []
+        for mon in state.valid_pokemon:
+            if mon.stable_id in self._pc_storage_stable_ids:
+                stable[mon.stable_id] = mon
+                continue
+            previous = previous_sightings.get(mon.stable_id)
+            consecutive = (
+                previous is not None
+                and previous[0] == mon.decoded.checksum
+                and state.scan_frame is not None
+                and previous[1] is not None
+                and state.scan_frame > previous[1]
+            )
+            if consecutive:
+                self._pc_storage_stable_ids.add(mon.stable_id)
+                stable[mon.stable_id] = mon
+                changes.append(mon)
+            else:
+                current_sightings[mon.stable_id] = (mon.decoded.checksum, state.scan_frame)
+
+        self._pc_storage_sightings = current_sightings
+        self._pc_storage_last_frame = state.scan_frame
+        self._pc_storage_stable_pokemon = tuple(stable.values())
+        self._pc_storage_changes = tuple(changes)
+        self._pc_storage_monitor_debug = {
+            "status": "scanned",
+            "frame": state.scan_frame,
+            "stream_identity": stream_identity,
+            "previous": [_boxed_monitor_identity(mon) for mon in previous_occupied.values()],
+            "current": [_boxed_monitor_identity(mon) for mon in current.values()],
+            "added": [_boxed_monitor_identity(current[identity]) for identity in sorted(added_ids)],
+            "removed": [
+                _boxed_monitor_identity(previous_occupied[identity])
+                for identity in sorted(removed_ids)
+            ],
+            "stable_new": [_boxed_monitor_identity(mon) for mon in changes],
+            "pending_stability": [
+                _boxed_monitor_identity(current[identity])
+                for identity in sorted(current_sightings)
+            ],
+        }
+        LOGGER.info(
+            "PC monitor frame=%s stream=%s previous=%s current=%s added=%s removed=%s stable_new=%s pending=%s",
+            state.scan_frame, stream_identity, sorted(previous_occupied), sorted(current),
+            sorted(added_ids), sorted(removed_ids),
+            [mon.stable_id for mon in changes], sorted(current_sightings),
+        )
+        for identity in sorted(added_ids):
+            LOGGER.info(
+                "PC monitor newly occupied record frame=%s details=%s stable=%s",
+                state.scan_frame, _boxed_monitor_identity(current[identity]),
+                identity in self._pc_storage_stable_ids,
+            )
+        self._pc_storage_last_occupied = current
+        return self._pc_storage_stable_pokemon
 
     def _decode_battle_battlers(self, party_payload) -> tuple[BattleBattler, ...]:
         if party_payload is self._battle_payload_cache:
