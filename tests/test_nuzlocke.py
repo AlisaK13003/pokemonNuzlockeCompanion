@@ -74,8 +74,10 @@ def test_encounter_status_death_count_and_persistence(tmp_path) -> None:
     assert run.deaths[0].nickname == "sparky"
 
     reloaded = NuzlockeStore(path)
-    loaded = reloaded.active_run
+    loaded = reloaded.get_run(run.run_id)
     assert loaded is not None
+    assert reloaded.active_run is None
+    assert loaded.status == "WON"
     assert loaded.encounters[location.location_id] == record
     assert loaded.notes == "Randomized seed notes"
     assert loaded.completed

@@ -33,8 +33,9 @@ include = ["pokemon_ev_tracker*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-pokemon_ev_tracker = ["assets/sprites/**/*.png", "assets/sprites/**/*.gif", "assets/sprites/**/*.webp"]
+pokemon_ev_tracker = ["assets/sprites/**/*.png", "assets/sprites/**/*.gif", "assets/sprites/**/*.webp", "assets/ui/*.svg"]
 "pokemon_ev_tracker.games.platinum" = ["data/*.json"]
+"pokemon_ev_tracker.pokemon.gen4" = ["data/*.json"]
 
 [tool.setuptools.data-files]
 "share/pokemon-platinum-ev-tracker" = ["LICENSE", "THIRD_PARTY_NOTICES.md"]

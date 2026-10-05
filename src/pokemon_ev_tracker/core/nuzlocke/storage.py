@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+import re
+from dataclasses import asdict, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -18,6 +19,7 @@ from pokemon_ev_tracker.core.nuzlocke.models import (
     NuzlockeGameProfile,
     NuzlockeRun,
     PokemonAcquisitionEvent,
+    RunStatus,
 )
 
 DEFAULT_NUZLOCKE_PATH = app_data_directory() / "nuzlocke_runs.json"
@@ -28,16 +30,29 @@ class NuzlockeStore:
         self.path = Path(path) if path is not None else DEFAULT_NUZLOCKE_PATH
         self.runs: list[NuzlockeRun] = []
         self.active_run_id: str | None = None
+        self._unknown_root_fields: dict = {}
+        self._unknown_run_fields: dict[str, dict] = {}
         self._load()
 
     @property
     def active_run(self) -> NuzlockeRun | None:
-        return self.get_run(self.active_run_id) if self.active_run_id else None
+        run = self.get_run(self.active_run_id) if self.active_run_id else None
+        return run if run and run.status == RunStatus.ACTIVE.value else None
 
     def get_run(self, run_id: str | None) -> NuzlockeRun | None:
         if run_id is None:
             return None
         return next((run for run in self.runs if run.run_id == run_id), None)
+
+    def suggest_next_run_name(self, profile: NuzlockeGameProfile) -> str:
+        previous = [run for run in self.runs if run.game == profile.game_id]
+        if previous:
+            match = re.fullmatch(r"(.*?)(\d+)", previous[-1].name.strip())
+            if match:
+                prefix, number = match.groups()
+                return f"{prefix}{int(number) + 1:0{max(2, len(number))}d}"
+        game = profile.display_name.removeprefix("Pokémon ").removeprefix("Pokemon ")
+        return f"{game} Run {len(previous) + 1:02d}"
 
     def create_run(self, name: str, profile: NuzlockeGameProfile) -> NuzlockeRun:
         cleaned_name = name.strip()
@@ -68,8 +83,11 @@ class NuzlockeStore:
         return run
 
     def switch_run(self, run_id: str) -> None:
-        if self.get_run(run_id) is None:
+        run = self.get_run(run_id)
+        if run is None:
             raise KeyError(f"Unknown Nuzlocke run: {run_id}")
+        if run.status != RunStatus.ACTIVE.value:
+            raise ValueError("Only ongoing runs can be activated.")
         previous = self.active_run_id
         self.active_run_id = run_id
         try:
@@ -93,13 +111,34 @@ class NuzlockeStore:
 
     def update_run_details(self, run_id: str, notes: str, completed: bool) -> None:
         run = self._require_run(run_id)
-        previous_notes, previous_completed = run.notes, run.completed
+        previous = run.notes, run.completed, run.status, run.ended_at, self.active_run_id
         run.notes = notes
         run.completed = bool(completed)
+        run.status = RunStatus.WON.value if completed else RunStatus.ACTIVE.value
+        run.ended_at = datetime.now(UTC).isoformat(timespec="seconds") if completed else None
+        if completed and self.active_run_id == run_id:
+            self.active_run_id = None
         try:
             self.save()
         except OSError:
-            run.notes, run.completed = previous_notes, previous_completed
+            run.notes, run.completed, run.status, run.ended_at, self.active_run_id = previous
+            raise
+
+    def set_run_status(self, run_id: str, status: RunStatus | str, note: str = "") -> None:
+        run = self._require_run(run_id)
+        status = RunStatus(status)
+        previous = run.status, run.completed, run.ended_at, run.outcome_note, self.active_run_id
+        run.status = status.value
+        run.completed = status == RunStatus.WON
+        run.ended_at = (None if status == RunStatus.ACTIVE else
+                        datetime.now(UTC).isoformat(timespec="seconds"))
+        run.outcome_note = note
+        if self.active_run_id == run_id and status != RunStatus.ACTIVE:
+            self.active_run_id = None
+        try:
+            self.save()
+        except OSError:
+            run.status, run.completed, run.ended_at, run.outcome_note, self.active_run_id = previous
             raise
 
     def delete_run(self, run_id: str) -> bool:
@@ -110,9 +149,7 @@ class NuzlockeStore:
         previous_active = self.active_run_id
         self.runs.remove(run)
         if self.active_run_id == run_id:
-            self.active_run_id = (
-                self.runs[min(index, len(self.runs) - 1)].run_id if self.runs else None
-            )
+            self.active_run_id = None
         try:
             self.save()
         except OSError:
@@ -479,12 +516,29 @@ class NuzlockeStore:
             run.completed_cap_ids = previous
             raise
 
+    def set_fight_notes(self, run_id: str, cap_id: str, notes: str) -> None:
+        run = self._require_run(run_id)
+        previous = run.fight_notes.copy()
+        if notes.strip():
+            run.fight_notes[cap_id] = notes.strip()
+        else:
+            run.fight_notes.pop(cap_id, None)
+        try:
+            self.save()
+        except OSError:
+            run.fight_notes = previous
+            raise
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            **self._unknown_root_fields,
             "version": 2,
             "active_run_id": self.active_run_id,
-            "runs": [asdict(run) for run in self.runs],
+            "runs": [
+                {**self._unknown_run_fields.get(run.run_id, {}), **asdict(run)}
+                for run in self.runs
+            ],
         }
         temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -503,6 +557,10 @@ class NuzlockeStore:
             return
         if not isinstance(payload, dict):
             return
+        self._unknown_root_fields = {
+            key: value for key, value in payload.items()
+            if key not in {"version", "active_run_id", "runs"}
+        }
         raw_runs = payload.get("runs", [])
         if not isinstance(raw_runs, list):
             return
@@ -514,11 +572,13 @@ class NuzlockeStore:
             except (KeyError, TypeError, ValueError):
                 continue
             self.runs.append(run)
+            known = {item.name for item in fields(NuzlockeRun)}
+            self._unknown_run_fields[run.run_id] = {
+                key: value for key, value in raw_run.items() if key not in known
+            }
         requested_active_id = payload.get("active_run_id")
-        if self.get_run(requested_active_id):
+        if self.get_run(requested_active_id) and self.get_run(requested_active_id).status == RunStatus.ACTIVE.value:
             self.active_run_id = requested_active_id
-        elif self.runs:
-            self.active_run_id = self.runs[0].run_id
 
 
 def _deserialize_run(raw: dict) -> NuzlockeRun:
@@ -580,6 +640,11 @@ def _deserialize_run(raw: dict) -> NuzlockeRun:
     completed_ids = raw.get("completed_cap_ids", [])
     if not isinstance(completed_ids, list):
         completed_ids = []
+    raw_fight_notes = raw.get("fight_notes", {})
+    fight_notes = (
+        {str(cap_id): notes for cap_id, notes in raw_fight_notes.items() if isinstance(notes, str)}
+        if isinstance(raw_fight_notes, dict) else {}
+    )
     observed_ids = raw.get("observed_pokemon_ids", [])
     if not isinstance(observed_ids, list):
         observed_ids = []
@@ -625,16 +690,22 @@ def _deserialize_run(raw: dict) -> NuzlockeRun:
                     source_location=str(raw_event.get("source_location", "PARTY")),
                 )
             )
+    status = (raw.get("status") if raw.get("status") in {item.value for item in RunStatus}
+              else RunStatus.WON.value if raw.get("completed") else RunStatus.ACTIVE.value)
     return NuzlockeRun(
         run_id=str(raw["run_id"]),
         name=str(raw["name"]),
         game=str(raw["game"]),
         created_at=str(raw.get("created_at") or datetime.now(UTC).isoformat(timespec="seconds")),
+        status=status,
+        ended_at=(str(raw["ended_at"]) if raw.get("ended_at") else None),
+        outcome_note=str(raw.get("outcome_note", "")),
         notes=str(raw.get("notes", "")),
-        completed=bool(raw.get("completed", False)),
+        completed=status == RunStatus.WON.value,
         encounters=encounters,
         level_cap_overrides=overrides,
         completed_cap_ids=[str(cap_id) for cap_id in completed_ids],
+        fight_notes=fight_notes,
         deaths=deaths,
         observed_pokemon_ids=[str(item) for item in observed_ids],
         acquisition_events=events,

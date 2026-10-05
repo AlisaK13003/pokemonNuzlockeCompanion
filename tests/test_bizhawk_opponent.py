@@ -24,6 +24,7 @@ from pokemon_ev_tracker.games.platinum.battle import (
 )
 from pokemon_ev_tracker.games.platinum.memory import PLATINUM_US
 from pokemon_ev_tracker.games.platinum.profile import PLATINUM_PROFILE
+from pokemon_ev_tracker.games.registry import default_game_provider
 from pokemon_ev_tracker.ui.main_window import MainWindow
 from pokemon_ev_tracker.ui.opponent_panel import CurrentOpponentPanel
 from pokemon_ev_tracker.ui.sprite_loader import SpriteAsset
@@ -296,6 +297,7 @@ def test_ram_debug_shows_all_candidate_records_and_current_enemy() -> None:
         )
 
         def __init__(self):
+            self.provider = default_game_provider()
             self.ram_party_summary_label = QLabel()
             self.debug_text = ""
 
@@ -444,7 +446,7 @@ def test_main_window_binds_debug_opponents_to_visible_tracker_cards(
         "+1 Speed EV",
     ]
     assert all(not card.isHidden() for card in panel.cards)
-    assert all(panel.layout().indexOf(card) >= 0 for card in panel.cards)
+    assert all(panel.opponents_layout.indexOf(card) >= 0 for card in panel.cards)
     assert all(not card.sprite.pixmap().isNull() for card in panel.cards)
     assert panel.height() > 0
     assert all(card.height() > 0 for card in panel.cards)

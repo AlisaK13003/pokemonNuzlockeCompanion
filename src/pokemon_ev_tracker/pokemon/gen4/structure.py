@@ -44,6 +44,8 @@ FRIENDSHIP_RECORD_OFFSET = 0x14
 FRIENDSHIP_BOX_DATA_OFFSET = FRIENDSHIP_RECORD_OFFSET - POKEMON_HEADER_SIZE
 MOVES_BOX_DATA_OFFSET = 0x20
 MOVE_SLOT_COUNT = 4
+MOVE_PP_BOX_DATA_OFFSET = MOVES_BOX_DATA_OFFSET + MOVE_SLOT_COUNT * 2
+MOVE_PP_UPS_BOX_DATA_OFFSET = MOVE_PP_BOX_DATA_OFFSET + MOVE_SLOT_COUNT
 
 _GEN4_INTL_CHARACTERS = (
     "\0　ぁあぃいぅうぇえぉおかがきぎ"
@@ -155,6 +157,8 @@ class DecodedPokemon:
     held_item_id: int
     friendship: int
     move_ids: tuple[int, int, int, int]
+    move_current_pps: tuple[int, int, int, int]
+    move_pp_ups: tuple[int, int, int, int]
     experience: int
     evs: EVs
     level: int | None
@@ -227,6 +231,12 @@ def decode_party_pokemon(
         int.from_bytes(decrypted[offset : offset + 2], "little")
         for offset in range(MOVES_BOX_DATA_OFFSET, MOVES_BOX_DATA_OFFSET + MOVE_SLOT_COUNT * 2, 2)
     )
+    move_current_pps = tuple(
+        decrypted[MOVE_PP_BOX_DATA_OFFSET : MOVE_PP_BOX_DATA_OFFSET + MOVE_SLOT_COUNT]
+    )
+    move_pp_ups = tuple(
+        decrypted[MOVE_PP_UPS_BOX_DATA_OFFSET : MOVE_PP_UPS_BOX_DATA_OFFSET + MOVE_SLOT_COUNT]
+    )
     experience = int.from_bytes(decrypted[0x08:0x0C], "little")
     nature = nature_from_pid(pid)
     ability_id = decrypted[ABILITY_BOX_DATA_OFFSET]
@@ -287,6 +297,8 @@ def decode_party_pokemon(
         held_item_id=held_item_id,
         friendship=friendship,
         move_ids=move_ids,
+        move_current_pps=move_current_pps,
+        move_pp_ups=move_pp_ups,
         experience=experience,
         evs=evs,
         level=level,

@@ -25,3 +25,7 @@ The bundled species EV-yield values are derived from PokeAPI's [`pokemon.csv`](h
 ## Offline Move-Name Lookup Data
 
 The bundled move-name lookup is derived from PokeAPI's [`moves.csv`](https://github.com/PokeAPI/pokeapi/blob/master/data/v2/csv/moves.csv), filtered to Generation IV move IDs 1-467 and normalized for display, with Generation IV spellings retained where they differ. The names are stored locally; the application makes no runtime API requests.
+
+## Offline Generation IV Move Metadata
+
+The bundled Generation IV move definitions use PokeAPI's [`moves.csv`](https://github.com/PokeAPI/pokeapi/blob/master/data/v2/csv/moves.csv), [`move_changelog.csv`](https://github.com/PokeAPI/pokeapi/blob/master/data/v2/csv/move_changelog.csv), and related type, category, and version-group tables. Four historical priority values omitted from that changelog are based on [Pokémon Showdown's Generation IV move overrides](https://github.com/smogon/pokemon-showdown/blob/master/data/mods/gen4/moves.ts). The data is packaged offline; details of the reconstruction are in [docs/gen4_move_catalog.md](docs/gen4_move_catalog.md).

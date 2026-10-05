@@ -7,35 +7,27 @@ import os
 import threading
 import time
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QMovie, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
-    QGroupBox,
-    QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QStatusBar,
-    QTabWidget,
-    QVBoxLayout,
     QWidget,
 )
 
+from pokemon_ev_tracker.config.training_preferences import EVTrainingPreferenceStore
 from pokemon_ev_tracker.core.automation.friendship_walk import (
     FriendshipWalkController,
     WalkAxis,
@@ -43,50 +35,45 @@ from pokemon_ev_tracker.core.automation.friendship_walk import (
 )
 from pokemon_ev_tracker.core.ev_changes import EVChangeTracker
 from pokemon_ev_tracker.core.ev_targets import EVTargetStore
+from pokemon_ev_tracker.core.ev_training import recommend_battle_evs
+from pokemon_ev_tracker.core.friendship_training import (
+    ETAStatus,
+    FriendshipETA,
+    FriendshipGoal,
+    FriendshipWalkSessionStats,
+)
+from pokemon_ev_tracker.core.moves import PokemonMoveState, resolve_move
 from pokemon_ev_tracker.core.nuzlocke.acquisition import (
-    AcquisitionCandidate,
     PartyAcquisitionObserver,
 )
 from pokemon_ev_tracker.core.nuzlocke.death_detection import PartyHpObserver, PartyHpSample
 from pokemon_ev_tracker.core.nuzlocke.models import PartyLevel
+from pokemon_ev_tracker.core.nuzlocke.run_prompt import NoRunPromptObserver
 from pokemon_ev_tracker.core.nuzlocke.storage import NuzlockeStore
-from pokemon_ev_tracker.data_sources.bizhawk import BizHawkRamDataSource
-from pokemon_ev_tracker.games.platinum.coordinate_discovery import (
-    MAX_SCAN_BYTES,
-    CoordinateDiscovery,
-    find_coordinate_candidates,
+from pokemon_ev_tracker.core.nuzlocke.wipe_detection import PartyWipeCandidate, PartyWipeObserver
+from pokemon_ev_tracker.data_sources.base import GameDataSource
+from pokemon_ev_tracker.games.provider import GameProvider, GameSession
+from pokemon_ev_tracker.games.registry import (
+    DEFAULT_GAME_ID,
+    default_game_provider,
+    get_game_provider,
 )
-from pokemon_ev_tracker.games.platinum.decoder import nickname_is_default
-from pokemon_ev_tracker.games.platinum.ev_yields import format_ev_yield
-from pokemon_ev_tracker.games.platinum.items import get_gen4_item_hint
-from pokemon_ev_tracker.games.platinum.locations import (
-    classify_platinum_acquisition,
-    platinum_nuzlocke_location_id,
-)
-from pokemon_ev_tracker.games.platinum.nuzlocke import PLATINUM_NUZLOCKE_PROFILE
-from pokemon_ev_tracker.games.platinum.pc_storage import (
-    BOX_POKEMON_SIZE,
-    PC_BOX_COUNT,
-    PC_BOX_RECORDS_SIZE,
-    PC_BOX_SLOTS,
-    SAVE_DATA_POINTER_ADDRESS,
-)
-from pokemon_ev_tracker.games.platinum.player_position import decode_player_position
-from pokemon_ev_tracker.games.platinum.profile import PLATINUM_PROFILE
-from pokemon_ev_tracker.games.platinum.species import load_gen4_species
 from pokemon_ev_tracker.pokemon.gen4.friendship import friendship_label
 from pokemon_ev_tracker.pokemon.gen4.structure import (
     HELD_ITEM_BOX_DATA_OFFSET,
     HELD_ITEM_RECORD_OFFSET,
     IVS_BOX_DATA_OFFSET,
     IVS_RECORD_OFFSET,
-    decode_box_pokemon,
 )
 from pokemon_ev_tracker.transport.bizhawk_server import FriendshipWalkCommandReceipt
+from pokemon_ev_tracker.ui.app_shell import AppShell
 from pokemon_ev_tracker.ui.backend_status import BackendStatusWidget
-from pokemon_ev_tracker.ui.collapsible_section import CollapsibleSection
+from pokemon_ev_tracker.ui.compact_nuzlocke import CompactNuzlockeView
+from pokemon_ev_tracker.ui.diagnostics_tools import build_advanced_diagnostics
+from pokemon_ev_tracker.ui.diagnostics_view import DiagnosticsView
 from pokemon_ev_tracker.ui.ev_change_log import EvChangeLogWidget
 from pokemon_ev_tracker.ui.ev_target_dialog import EVTargetDialog
+from pokemon_ev_tracker.ui.friendship_panel import FriendshipWalkPanel
 from pokemon_ev_tracker.ui.item_sprite_loader import (
     get_item_sprite,
     item_sprite_exists,
@@ -95,13 +82,21 @@ from pokemon_ev_tracker.ui.item_sprite_loader import (
 )
 from pokemon_ev_tracker.ui.nuzlocke_view import NuzlockeView
 from pokemon_ev_tracker.ui.opponent_panel import CurrentOpponentPanel
-from pokemon_ev_tracker.ui.party_card import PartyCard, PartyCardSize, PartyGrid
+from pokemon_ev_tracker.ui.party_card import PartyCard
 from pokemon_ev_tracker.ui.sprite_loader import (
     get_animated_sprite_size,
     get_static_sprite,
     resolve_sprite_asset,
 )
 from pokemon_ev_tracker.ui.theme import apply_theme, refresh_style
+from pokemon_ev_tracker.ui.tracker_views import (
+    CompactPartyStatsView,
+    CompactTrainingView,
+    PartyStatsView,
+    RecommendationPanel,
+    TrainingView,
+)
+from pokemon_ev_tracker.ui.training_focus_dialog import TrainingFocusDialog
 
 LOGGER = logging.getLogger(__name__)
 
@@ -130,55 +125,6 @@ def _parse_optional_int(value) -> int | None:
         except ValueError:
             return None
     return None
-
-
-@lru_cache(maxsize=1)
-def _gen4_species_names() -> dict[int, str]:
-    return {species.national_dex_number: species.name for species in load_gen4_species()}
-
-
-def _acquisition_candidate(pokemon) -> AcquisitionCandidate:
-    decoded = pokemon.decoded
-    nickname = decoded.nickname or ""
-    if nickname_is_default(nickname, pokemon.species):
-        nickname = ""
-    return AcquisitionCandidate(
-        stable_id=pokemon.stable_id,
-        species_id=pokemon.species_id,
-        species_name=pokemon.species,
-        nickname=nickname,
-        level=pokemon.level,
-        met_level=pokemon.met_level,
-        met_location_id=pokemon.met_location_id,
-        met_location_name=pokemon.met_location_name,
-        egg_location_id=pokemon.egg_location_id,
-        origin_game=pokemon.origin_game,
-        is_egg=pokemon.is_egg,
-        source_location="PARTY",
-    )
-
-
-def _boxed_acquisition_candidate(pokemon) -> AcquisitionCandidate:
-    decoded = pokemon.decoded
-    nickname = decoded.nickname or ""
-    if nickname_is_default(nickname, pokemon.species_name):
-        nickname = ""
-    return AcquisitionCandidate(
-        stable_id=decoded.stable_id,
-        species_id=decoded.species_id,
-        species_name=pokemon.species_name,
-        nickname=nickname,
-        level=decoded.met_level,
-        met_level=decoded.met_level,
-        met_location_id=decoded.met_location_id,
-        met_location_name=pokemon.met_location_name,
-        egg_location_id=decoded.egg_location_id,
-        origin_game=decoded.origin_game,
-        is_egg=decoded.is_egg,
-        source_location="BOX",
-        box_index=pokemon.box_index,
-        slot_index=pokemon.slot_index,
-    )
 
 
 def _valid_acquisition_snapshot(party_state) -> bool:
@@ -260,18 +206,34 @@ class MainWindow(QMainWindow):
     def __init__(
         self,
         settings,
-        data_source: BizHawkRamDataSource | None = None,
+        data_source: GameDataSource | None = None,
         target_store: EVTargetStore | None = None,
         nuzlocke_store: NuzlockeStore | None = None,
+        training_preference_store: EVTrainingPreferenceStore | None = None,
+        provider: GameProvider | None = None,
     ) -> None:
         super().__init__()
         self.settings = settings
-        self.profile = getattr(data_source, "profile", PLATINUM_PROFILE)
-        self.ram_data_source = data_source or BizHawkRamDataSource(profile=self.profile)
-        self.ev_target_store = target_store or EVTargetStore()
+        source_profile = getattr(data_source, "profile", None)
+        game_id = getattr(source_profile, "game_id", DEFAULT_GAME_ID)
+        self.provider = provider or get_game_provider(game_id)
+        self.profile = source_profile or self.provider.profile
+        self.ram_data_source = data_source or self.provider.make_data_source()
+        self.game_session = GameSession(self.provider, self.ram_data_source)
+        # Retain explicit legacy-store injection for compatibility, but never load,
+        # migrate, or rewrite numeric targets as part of the new Training workflow.
+        self.ev_target_store = target_store
+        self.training_preference_store = training_preference_store or EVTrainingPreferenceStore()
+        self._training_opponent_yields = ()
+        self._training_battle_state = "idle"
+        self._training_party_connected = False
+        self.training_recommendations = {}
         self.nuzlocke_view = NuzlockeView(
             store=nuzlocke_store,
-            profiles=(PLATINUM_NUZLOCKE_PROFILE,),
+            profiles=((self.provider.nuzlocke_profile,)
+                      if self.provider.capabilities.nuzlocke
+                      and self.provider.nuzlocke_profile is not None else ()),
+            settings=settings,
         )
         self._acquisition_observer = PartyAcquisitionObserver()
         self._pc_acquisition_observer = PartyAcquisitionObserver(reset_on_disconnect=False)
@@ -313,18 +275,25 @@ class MainWindow(QMainWindow):
         self._last_pc_storage_discovery_key = None
         self._last_pc_storage_scan_frame: int | None = None
         self._party_hp_observer = PartyHpObserver()
+        self._party_wipe_observer = PartyWipeObserver()
+        self._no_run_prompt_observer = NoRunPromptObserver()
         self.compact_mode = False
         self.tracker_view = "training"
         self._compact_member_count = -1
         self._compact_opponent_count = -1
         self._party_layout_slots: tuple[int, ...] = ()
         self._ev_history_records: list[tuple[str, str]] = []
-        self._pre_compact_tab_index = 0
+        self._compact_return_route = None
         self._suspend_geometry_save = True
         self._changing_mode = False
         self._ev_change_tracker = EVChangeTracker()
         self._ev_history_limit = 200
         self.friendship_walk = FriendshipWalkController()
+        self._walk_session: FriendshipWalkSessionStats | None = None
+        self._walk_session_identity: str | None = None
+        self._walk_target_reached = False
+        self._walk_tracked_missing = False
+        self._walk_session_ended = True
         self._friendship_walk_start_frame: int | None = None
         self._friendship_walk_pending_sequence: int | None = None
         self._friendship_walk_pending_axis: str | None = None
@@ -338,7 +307,9 @@ class MainWindow(QMainWindow):
         self._walk_unacked_since: float | None = None
         self._walk_command_state = "UNKNOWN"
         self._remote_walk_stop_requested = False
-        self.coordinate_discovery = CoordinateDiscovery()
+        self.coordinate_discovery = (
+            self.provider.coordinate_discovery_type()
+            if self.provider.capabilities.player_position else None)
         self._coordinate_capture_id: str | None = None
         self._coordinate_capture_label: str | None = None
         self._coordinate_capture_source: str | None = None
@@ -352,8 +323,10 @@ class MainWindow(QMainWindow):
         )
         self.resize(1100, 760)
         self._build_ui()
+        self._apply_game_capabilities()
         apply_theme(self)
         self.set_tracker_view(settings.tracker_view, persist=False)
+        self.set_route(settings.workspace_view or settings.tracker_view, persist=False)
         self._geometry_save_timer = QTimer(self)
         self._geometry_save_timer.setSingleShot(True)
         self._geometry_save_timer.setInterval(450)
@@ -369,43 +342,20 @@ class MainWindow(QMainWindow):
         self._set_compact_mode(settings.compact_mode, persist=False, initial=True)
         self._suspend_geometry_save = False
 
-        self.ram_data_source.start()
+        if self.provider.capabilities.live_party:
+            self.ram_data_source.start()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._refresh_ram_backend_debug)
         self.refresh_timer.setInterval(250)
-        self.refresh_timer.start()
-        self._refresh_ram_backend_debug()
+        if self.provider.capabilities.live_party:
+            self.refresh_timer.start()
+            self._refresh_ram_backend_debug()
+        else:
+            self._show_unsupported_game_state()
 
     def _build_ui(self) -> None:
-        root = QWidget(self)
-        root.setObjectName("appRoot")
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(8, 7, 8, 7)
-        root_layout.setSpacing(6)
-        self._root_layout = root_layout
-
-        toolbar = QWidget()
-        toolbar.setObjectName("applicationToolbar")
-        toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(2, 0, 2, 0)
-        toolbar_layout.setSpacing(9)
-        self.tracker_title = QLabel(f"{self.profile.display_name} Companion")
-        self.tracker_title.setObjectName("applicationTitle")
-        toolbar_layout.addWidget(self.tracker_title)
-        toolbar_layout.addStretch(1)
-        self.compact_mode_button = QPushButton("Compact Mode")
-        self.compact_mode_button.setCheckable(True)
-        self.compact_mode_button.setProperty("buttonRole", "compactToggle")
-        self.compact_mode_button.setToolTip("Toggle compact always-on-top tracker")
-        self.compact_mode_button.toggled.connect(self.set_compact_mode)
-        toolbar_layout.addWidget(self.compact_mode_button)
         self.backend_status = BackendStatusWidget()
         self.backend_status.details_widget.hide()
-        self.backend_status.setSizePolicy(
-            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred
-        )
-        toolbar_layout.addWidget(self.backend_status)
-        root_layout.addWidget(toolbar)
         self.compact_status_label = self.backend_status.compact_label
         self.tracker_backend_group = self.backend_status
         self.tracker_status_labels = {
@@ -415,455 +365,81 @@ class MainWindow(QMainWindow):
             "last_update": self.backend_status.details["last_update"],
             "frame": self.backend_status.details["frame"],
         }
-
+        self.shell = AppShell(
+            self.provider.display_name, self.backend_status,
+            generation=self.provider.generation, emulator=self.provider.emulator)
+        self.shell.setProperty("gameMotif", self.provider.theme.motif_id)
+        self.shell.setProperty("gameAccentPrimary", self.provider.theme.accent_primary)
+        self.shell.setProperty("gameAccentSecondary", self.provider.theme.accent_secondary)
+        self.setCentralWidget(self.shell)
+        self._root_layout = self.shell.root_layout
+        self.tracker_title = self.shell.brand
+        self.compact_mode_button = self.shell.compact_button
+        self.tracker_view_buttons = {key: self.shell.nav_buttons[key] for key in ("training", "stats")}
+        self.shell.route_requested.connect(self.set_route)
+        self.shell.compact_requested.connect(self.set_compact_mode)
+        self.shell.notification_requested.connect(self._review_detection)
         self.compact_shortcut = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
         self.compact_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self.compact_shortcut.activated.connect(self.compact_mode_button.toggle)
 
-        self.main_tabs = QTabWidget()
-        self.main_tabs.setObjectName("topLevelTabs")
-        tracker_page = QWidget()
-        tracker_page.setObjectName("trackerPage")
-        self.tracker_layout = QVBoxLayout(tracker_page)
-        self.tracker_layout.setContentsMargins(4, 4, 4, 4)
-        self.tracker_layout.setSpacing(7)
-        self.nuzlocke_view.move_ram_death_notification(tracker_page)
-        self.current_opponent_panel = CurrentOpponentPanel(tracker_page)
-        self.tracker_layout.addWidget(self.current_opponent_panel)
-        self._build_friendship_walk(tracker_page)
-        self.tracker_layout.addWidget(self.nuzlocke_view.ram_death_group)
-
-        party_header = QWidget()
-        party_header.setObjectName("partyHeader")
-        party_header_layout = QHBoxLayout(party_header)
-        party_header_layout.setContentsMargins(0, 0, 0, 0)
-        party_header_layout.setSpacing(6)
-        party_heading = QLabel("Party")
-        party_heading.setProperty("uiRole", "sectionHeading")
-        party_header_layout.addWidget(party_heading)
-        party_header_layout.addStretch(1)
-        self.tracker_view_buttons = {}
-        self.tracker_view_button_group = QButtonGroup(self)
-        self.tracker_view_button_group.setExclusive(True)
-        for view, label in (("training", "Training View"), ("stats", "Party Stats")):
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setProperty("buttonRole", "segmented")
-            self.tracker_view_button_group.addButton(button)
-            self.tracker_view_buttons[view] = button
-            party_header_layout.addWidget(button)
-            button.clicked.connect(
-                lambda _checked=False, selected_view=view: self.set_tracker_view(selected_view)
-            )
-        self.tracker_layout.addWidget(party_header)
+        # Transitional formatting adapter: the proven render methods populate these
+        # fields. The six legacy cards are never mounted in the visible workspace.
+        self._party_adapter_host = QWidget(self)
+        self._party_adapter_host.hide()
         self.tracker_party_cards = {}
         self.party_card_widgets = {}
         for slot in range(1, 7):
-            widget = PartyCard(slot, tracker_page)
-            self.tracker_party_cards[slot] = widget.fields
-            self.party_card_widgets[slot] = widget
-            widget.card_size_changed.connect(self._refresh_card_sprite_for_size)
-            widget.fields["edit_target_button"].clicked.connect(
-                lambda _checked=False, card_slot=slot: self._edit_ev_target(card_slot)
-            )
-            widget.fields["clear_target_button"].clicked.connect(
-                lambda _checked=False, card_slot=slot: self._clear_ev_target(card_slot)
-            )
-        self.party_grid = PartyGrid(self.tracker_party_cards, tracker_page)
-        self.tracker_party_cards_widget = self.party_grid
-        self.tracker_party_card_rows = self.party_grid.rows
-        self.tracker_party_card_row_widgets = self.party_grid.row_widgets
-        self.tracker_layout.addWidget(self.party_grid)
-
-        self.ev_change_log = EvChangeLogWidget(self._clear_ev_log, tracker_page)
+            card = PartyCard(slot, self._party_adapter_host)
+            self.tracker_party_cards[slot] = card.fields
+            self.party_card_widgets[slot] = card
+            card.card_size_changed.connect(self._refresh_card_sprite_for_size)
+        self.training_view = TrainingView()
+        self.party_stats_view = PartyStatsView()
+        self.compact_training_view = CompactTrainingView()
+        self.compact_party_stats_view = CompactPartyStatsView()
+        self._party_views = (self.training_view, self.party_stats_view,
+                             self.compact_training_view, self.compact_party_stats_view)
+        for view in self._party_views:
+            view.selected_slot_changed.connect(self._select_party_slot)
+        for view in (self.training_view, self.compact_training_view):
+            view.edit_focus_requested.connect(self._edit_training_focus)
+            view.clear_focus_requested.connect(self._clear_training_focus)
+        self.nuzlocke_view.presentation_changed.connect(self._refresh_fight_summaries)
+        self._refresh_fight_summaries()
+        self.current_opponent_panel = CurrentOpponentPanel(
+            ev_yield_summary=self.provider.format_ev_yield_summary)
+        if not self.provider.capabilities.live_opponents:
+            self.current_opponent_panel.set_unavailable()
+        self.recommendation_panel = RecommendationPanel()
+        self.ev_change_log = EvChangeLogWidget(self._clear_ev_log)
         self.ev_change_list = self.ev_change_log.list
         self.clear_ev_log_button = self.ev_change_log.clear_button
         self.ev_history_group = self.ev_change_log
-        self.tracker_layout.addWidget(self.ev_change_log)
-        self.tracker_scroll_area = self._scroll_page(tracker_page)
-        self.main_tabs.addTab(self.tracker_scroll_area, "Tracker")
+        self._build_friendship_walk(None)
+        self.training_view.set_runtime_widgets(
+            opponent=self.current_opponent_panel, recommendations=self.recommendation_panel,
+            history=self.ev_change_log, friendship=self.friendship_walk_group)
+        self.tracker_scroll_area = self.training_view.scroll
 
-        debug_page = QWidget()
-        debug_page.setObjectName("ramDebugPage")
-        debug_layout = QVBoxLayout(debug_page)
-        debug_layout.setContentsMargins(8, 8, 8, 8)
-        self.ram_backend_labels = {}
-        status_grid = QVBoxLayout()
-        self.available_domains_label = QLabel("Available domains: --")
-        self.available_domains_label.setWordWrap(True)
-        self.ram_backend_labels["available_domains"] = self.available_domains_label
-        self.ram_backend_labels.update(self.tracker_status_labels)
-        for key, title in (
-            ("backend", "Backend"),
-            ("connection", "Connection"),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(QLabel(title))
-            row.addWidget(self.tracker_status_labels[key], 1)
-            status_grid.addLayout(row)
-        status_grid.addWidget(self.available_domains_label)
-        debug_layout.addLayout(status_grid)
-        self.backend_details_section = CollapsibleSection(
-            "Backend details", self.backend_status.details_widget, expanded=False
-        )
-        debug_layout.addWidget(self.backend_details_section)
-        self._build_coordinate_discovery(debug_layout, debug_page)
-        self.pc_storage_summary_label = QLabel("Waiting for PC storage scan.")
-        self.pc_storage_summary_label.setWordWrap(True)
-        self.pc_storage_scan_button = QPushButton("Scan PC Now")
-        self.pc_storage_scan_button.setToolTip(
-            "Request an immediate PC-box RAM scan from the BizHawk Lua script."
-        )
-        self.pc_storage_scan_button.clicked.connect(self._request_pc_storage_scan)
-        self.pc_storage_discovery_button = QPushButton("Discover PC Storage Address")
-        self.pc_storage_discovery_button.setToolTip(
-            "Run a one-shot Main RAM search for checksum-valid Gen IV boxed Pokemon."
-        )
-        self.pc_storage_discovery_button.clicked.connect(self._request_pc_storage_discovery)
-        self.pc_storage_discovery_cancel_button = QPushButton("Cancel Discovery")
-        self.pc_storage_discovery_cancel_button.setToolTip(
-            "Stop the active incremental PC storage discovery scan."
-        )
-        self.pc_storage_discovery_cancel_button.setEnabled(False)
-        self.pc_storage_discovery_cancel_button.clicked.connect(
-            self._cancel_pc_storage_discovery
-        )
-        self.pc_storage_scan_status_label = QLabel("Automatic scan: every 60 frames")
-        self.pc_storage_discovery_status_label = QLabel("idle")
-        self.pc_storage_discovery_status_label.setWordWrap(True)
-        self.pc_storage_discovery_status_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        pc_storage_toolbar = QHBoxLayout()
-        pc_storage_toolbar.addWidget(self.pc_storage_scan_button)
-        pc_storage_toolbar.addWidget(self.pc_storage_discovery_button)
-        pc_storage_toolbar.addWidget(self.pc_storage_discovery_cancel_button)
-        pc_storage_toolbar.addWidget(QLabel("Discovery:"))
-        pc_storage_toolbar.addWidget(self.pc_storage_discovery_status_label, 1)
-        pc_storage_toolbar.addWidget(self.pc_storage_scan_status_label, 1)
-        pc_save_test_toolbar = QHBoxLayout()
-        pc_save_file_layout = QHBoxLayout()
-        pc_save_file_layout.addWidget(QLabel("External SaveRAM fallback directory:"))
-        self.pc_save_offset_directory_edit = QLineEdit(
-            self._default_bizhawk_save_ram_directory()
-        )
-        self.pc_save_offset_directory_edit.setPlaceholderText(
-            "Select BizHawk's NDS\\SaveRAM directory"
-        )
-        self.pc_save_offset_directory_edit.setToolTip(
-            "Optional fallback only. The live SRAM-domain search does not read or depend on files in this directory."
-        )
-        pc_save_file_layout.addWidget(self.pc_save_offset_directory_edit, 1)
-        self.pc_save_offset_directory_browse_button = QPushButton("Browse")
-        self.pc_save_offset_directory_browse_button.setToolTip(
-            "Select BizHawk's configured NDS SaveRAM directory."
-        )
-        self.pc_save_offset_directory_browse_button.clicked.connect(
-            self._browse_pc_save_offset_directory
-        )
-        pc_save_file_layout.addWidget(self.pc_save_offset_directory_browse_button)
-        self.pc_save_offset_test_button = QPushButton("Test Save-File PC Offsets (fallback)")
-        self.pc_save_offset_test_button.setToolTip(
-            "Optional fallback experiment using external SaveRAM files when the live SRAM domain is unavailable. "
-            "It is separate from Search SRAM for Box Pokemon."
-        )
-        self.pc_save_offset_test_button.clicked.connect(
-            self._request_pc_save_offset_test
-        )
-        pc_save_test_toolbar.addWidget(self.pc_save_offset_test_button)
-        pc_save_test_toolbar.addWidget(QLabel("Save test:"))
-        self.pc_save_offset_test_status_label = QLabel("idle")
-        self.pc_save_offset_test_status_label.setWordWrap(True)
-        self.pc_save_offset_test_status_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        pc_save_test_toolbar.addWidget(self.pc_save_offset_test_status_label, 1)
-        pc_sram_search_toolbar = QHBoxLayout()
-        self.pc_sram_search_button = QPushButton("Search SRAM for Box Pokemon")
-        self.pc_sram_search_button.setToolTip(
-            "Incrementally read the live BizHawk SRAM domain, then search for the selected boxed Pokemon. "
-            "Click again after moving it without saving in-game to compare captures."
-        )
-        self.pc_sram_search_button.clicked.connect(self._request_pc_sram_pokemon_search)
-        pc_sram_search_toolbar.addWidget(self.pc_sram_search_button)
-        self.pc_sram_reset_target_button = QPushButton("Reset A/B Target")
-        self.pc_sram_reset_target_button.clicked.connect(self._reset_pc_sram_search_target)
-        pc_sram_search_toolbar.addWidget(self.pc_sram_reset_target_button)
-        pc_sram_search_toolbar.addWidget(QLabel("SRAM search:"))
-        self.pc_sram_search_status_label = QLabel("idle")
-        self.pc_sram_search_status_label.setWordWrap(True)
-        self.pc_sram_search_status_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        pc_sram_search_toolbar.addWidget(self.pc_sram_search_status_label, 1)
-        pc_storage_session_toolbar = QHBoxLayout()
-        pc_storage_session_toolbar.addWidget(QLabel("Box 1 Slot 1:"))
-        self.pc_layout_nickname_edit = QLineEdit(self.settings.pc_box1_nickname)
-        self.pc_layout_nickname_edit.setMaxLength(10)
-        self.pc_layout_nickname_edit.setPlaceholderText("nickname (optional)")
-        pc_storage_session_toolbar.addWidget(self.pc_layout_nickname_edit)
-        self.pc_layout_species_combo = _NoWheelComboBox()
-        for species in load_gen4_species():
-            self.pc_layout_species_combo.addItem(
-                species.name, species.national_dex_number
-            )
-        self.pc_layout_species_combo.setCurrentIndex(
-            max(0, self.pc_layout_species_combo.findData(self.settings.pc_box1_species_id))
-        )
-        pc_storage_session_toolbar.addWidget(self.pc_layout_species_combo)
-        self.pc_discover_current_layout_button = QPushButton("Rediscover PC Layout")
-        self.pc_discover_current_layout_button.clicked.connect(
-            self._rediscover_pc_layout
-        )
-        self.pc_layout_retry_button = QPushButton("Retry Discovery")
-        self.pc_layout_retry_button.clicked.connect(self._rediscover_pc_layout)
-        pc_storage_session_toolbar.addWidget(self.pc_layout_retry_button)
-        self.pc_storage_resolver_status_label = QLabel("PC resolver: unresolved")
-        self.pc_storage_resolver_status_label.setWordWrap(True)
-        self.pc_storage_resolver_address_label = QLabel("First record: --")
-        pc_storage_baseline_row = QHBoxLayout()
-        self.pc_storage_baseline_count_label = QLabel("Baseline occupied Pokemon: --")
-        pc_storage_baseline_row.addWidget(self.pc_storage_baseline_count_label)
-        self.pc_storage_monitoring_label = QLabel("Monitoring for new boxed Pokemon: no")
-        pc_storage_baseline_row.addWidget(self.pc_storage_monitoring_label)
-        pc_storage_baseline_row.addStretch(1)
-        self.pc_storage_baseline_message_label = QLabel("")
-        self.pc_storage_baseline_message_label.setWordWrap(True)
-        self.pc_storage_cache_status_label = QLabel("Cache install: not sent")
-        self.pc_storage_cache_status_label.setWordWrap(True)
-        self.pc_storage_retry_cache_button = QPushButton("Retry Cache Install")
-        self.pc_storage_retry_cache_button.setEnabled(False)
-        self.pc_storage_retry_cache_button.hide()
-        self.pc_storage_retry_cache_button.clicked.connect(self._retry_pc_storage_cache_install)
-        pc_storage_anchor_toolbar = QHBoxLayout()
-        pc_storage_anchor_toolbar.addWidget(QLabel("Pokemon RAM address:"))
-        self.pc_storage_anchor_address_edit = QLineEdit()
-        self.pc_storage_anchor_address_edit.setPlaceholderText("0x02200000")
-        self.pc_storage_anchor_address_edit.setMaxLength(10)
-        self.pc_storage_anchor_address_edit.setToolTip(
-            "Session-specific address of a known Box 1 Slot 1 record, not the proposed "
-            "0x28-byte structure base. Used for diagnosis only."
-        )
-        pc_storage_anchor_toolbar.addWidget(self.pc_storage_anchor_address_edit)
-        self.pc_storage_anchor_button = QPushButton("Scan Anchor")
-        self.pc_storage_anchor_button.setToolTip(
-            "Evaluate 18 x 30 records from this address and inspect the preceding PCBoxes bytes."
-        )
-        self.pc_storage_anchor_button.clicked.connect(
-            self._request_pc_storage_anchor_discovery
-        )
-        pc_storage_anchor_toolbar.addWidget(self.pc_storage_anchor_button)
-        self.pc_storage_anchor_status_label = QLabel("idle")
-        self.pc_storage_anchor_status_label.setWordWrap(True)
-        pc_storage_anchor_toolbar.addWidget(self.pc_storage_anchor_status_label)
-        self.pc_storage_pointer_search_button = QPushButton(
-            "Search Structure Pointers"
-        )
-        self.pc_storage_pointer_search_button.setToolTip(
-            "Incrementally search Main RAM for direct references to the proposed "
-            "0x28-byte header and first BoxPokemon record."
-        )
-        self.pc_storage_pointer_search_button.clicked.connect(
-            self._search_pc_structure_pointers
-        )
-        pc_storage_anchor_toolbar.addWidget(self.pc_storage_pointer_search_button)
-        self.pc_storage_pointer_search_status_label = QLabel("idle")
-        self.pc_storage_pointer_search_status_label.setWordWrap(True)
-        pc_storage_anchor_toolbar.addWidget(
-            self.pc_storage_pointer_search_status_label
-        )
-        self.pc_storage_inspect_button = QPushButton("Inspect Pokemon Anchor")
-        self.pc_storage_inspect_button.setToolTip(
-            "Incrementally inspect Main RAM around this record, scan aligned Pokemon records, "
-            "and search for direct pointers and matching copies."
-        )
-        self.pc_storage_inspect_button.clicked.connect(
-            self._inspect_pc_pokemon_anchor
-        )
-        self.pc_storage_search_button = QPushButton("Search RAM for This Pokemon")
-        self.pc_storage_search_button.setToolTip(
-            "Use the last inspected Pokemon's PID and checksum to find matching records; "
-            "only matching records are returned."
-        )
-        self.pc_storage_search_button.clicked.connect(self._search_pc_pokemon_identity)
-        self.pc_storage_inspection_status_label = QLabel("idle")
-        self.pc_storage_inspection_status_label.setWordWrap(True)
-        self.pc_storage_inspection_reset_button = QPushButton(
-            "Reset Movement Baseline"
-        )
-        self.pc_storage_inspection_reset_button.setToolTip(
-            "Clear the saved Pokemon identity and address baseline; inspect the anchor again to recapture it."
-        )
-        self.pc_storage_inspection_reset_button.clicked.connect(
-            self._reset_pc_pokemon_inspection_baseline
-        )
-        pc_storage_anchor_toolbar.addStretch(1)
-        pc_storage_inspection_toolbar = QHBoxLayout()
-        pc_storage_inspection_toolbar.addWidget(self.pc_storage_inspect_button)
-        pc_storage_inspection_toolbar.addWidget(self.pc_storage_search_button)
-        pc_storage_inspection_toolbar.addWidget(
-            self.pc_storage_inspection_status_label, 1
-        )
-        pc_storage_inspection_toolbar.addWidget(
-            self.pc_storage_inspection_reset_button
-        )
-        self.pc_storage_details = QPlainTextEdit()
-        self.pc_storage_details.setReadOnly(True)
-        self.pc_storage_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.pc_storage_details.setPlaceholderText("Waiting for PC storage RAM payload.")
-        self.pc_storage_details.setMinimumHeight(110)
-        self.pc_storage_discovery_details = QPlainTextEdit()
-        self.pc_storage_discovery_details.setReadOnly(True)
-        self.pc_storage_discovery_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.pc_storage_discovery_details.setMinimumHeight(180)
-        self.pc_storage_discovery_details.setPlaceholderText(
-            "Click Discover PC Storage Address to run a one-shot Main RAM search."
-        )
-        self.pc_storage_discovery_details.setPlainText(self._last_pc_storage_discovery_text)
-        self.pc_save_offset_test_details = QPlainTextEdit()
-        self.pc_save_offset_test_details.setReadOnly(True)
-        self.pc_save_offset_test_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.pc_save_offset_test_details.setMinimumHeight(120)
-        self.pc_save_offset_test_details.setPlaceholderText(
-            "Capture once, move a boxed Pokemon without saving, then capture again."
-        )
-        self.pc_save_offset_test_details.setPlainText(
-            self._last_pc_save_offset_test_text
-        )
-        self.pc_sram_search_details = QPlainTextEdit()
-        self.pc_sram_search_details.setReadOnly(True)
-        self.pc_sram_search_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.pc_sram_search_details.setMinimumHeight(180)
-        self.pc_sram_search_details.setPlaceholderText(
-            "Live SRAM search results, matching records, neighboring slots, and movement between captures."
-        )
-        self.pc_sram_search_details.setPlainText(self._last_pc_sram_search_text)
-        pc_storage_discovery_pane = QWidget()
-        pc_storage_discovery_pane.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        pc_storage_discovery_layout = QVBoxLayout(pc_storage_discovery_pane)
-        pc_storage_discovery_layout.setContentsMargins(0, 0, 0, 0)
-        pc_storage_discovery_heading = QHBoxLayout()
-        pc_storage_discovery_heading.addWidget(QLabel("PC Storage Discovery"), 1)
-        self.pc_storage_discovery_expand_button = QPushButton("Expand")
-        self.pc_storage_discovery_expand_button.setObjectName(
-            "pcStorageDiscoveryExpandButton"
-        )
-        self.pc_storage_discovery_expand_button.setCheckable(True)
-        self.pc_storage_discovery_expand_button.setToolTip(
-            "Give the discovery results more vertical space; drag the divider to resize manually."
-        )
-        self.pc_storage_discovery_expand_button.toggled.connect(
-            self._set_pc_storage_discovery_expanded
-        )
-        pc_storage_discovery_heading.addWidget(
-            self.pc_storage_discovery_expand_button
-        )
-        pc_storage_discovery_layout.addLayout(pc_storage_discovery_heading)
-        pc_storage_discovery_layout.addWidget(self.pc_storage_discovery_details, 1)
-        self.pc_storage_panes_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.pc_storage_panes_splitter.setObjectName("pcStoragePanesSplitter")
-        self.pc_storage_panes_splitter.setChildrenCollapsible(False)
-        self.pc_storage_panes_splitter.setHandleWidth(8)
-        self.pc_storage_panes_splitter.addWidget(self.pc_storage_details)
-        self.pc_storage_panes_splitter.addWidget(pc_storage_discovery_pane)
-        self.pc_storage_panes_splitter.addWidget(self.pc_save_offset_test_details)
-        self.pc_storage_panes_splitter.addWidget(self.pc_sram_search_details)
-        self.pc_storage_panes_splitter.setStretchFactor(0, 1)
-        self.pc_storage_panes_splitter.setStretchFactor(1, 2)
-        self.pc_storage_panes_splitter.setStretchFactor(2, 1)
-        self.pc_storage_panes_splitter.setStretchFactor(3, 2)
-        self.pc_storage_panes_splitter.setSizes([1, 2, 1, 2])
-        pc_storage_content = QWidget(debug_page)
-        pc_storage_layout = QVBoxLayout(pc_storage_content)
-        pc_storage_layout.setContentsMargins(0, 0, 0, 0)
-        self.pc_storage_status_label = QLabel("Status: Connecting")
-        self.pc_storage_layout_label = QLabel("Box layout: Unresolved")
-        self.pc_storage_occupied_label = QLabel("Boxed Pokemon: --")
-        self.pc_storage_catch_status_label = QLabel("Monitoring new catches: No")
-        self.pc_storage_progress_label = QLabel("")
-        self.pc_storage_last_event_label = QLabel("Last PC event: No PC events yet.")
-        self.pc_storage_recovery_label = QLabel("")
-        for label in (
-            self.pc_storage_status_label, self.pc_storage_layout_label,
-            self.pc_storage_occupied_label, self.pc_storage_catch_status_label,
-            self.pc_storage_progress_label, self.pc_storage_last_event_label,
-            self.pc_storage_recovery_label,
-        ):
-            label.setWordWrap(True)
-            pc_storage_layout.addWidget(label)
-        normal_actions = QHBoxLayout()
-        normal_actions.addWidget(self.pc_discover_current_layout_button)
-        normal_actions.addStretch(1)
-        pc_storage_layout.addLayout(normal_actions)
-        self.pc_storage_anchor_recovery = QWidget(pc_storage_content)
-        recovery_layout = QVBoxLayout(self.pc_storage_anchor_recovery)
-        recovery_layout.setContentsMargins(0, 0, 0, 0)
-        recovery_layout.addLayout(pc_storage_session_toolbar)
-        pc_storage_layout.addWidget(self.pc_storage_anchor_recovery)
-        self.pc_storage_anchor_recovery.hide()
-
-        advanced_content = QWidget(pc_storage_content)
-        advanced_layout = QVBoxLayout(advanced_content)
-        advanced_layout.setContentsMargins(0, 0, 0, 0)
-        self.pc_storage_advanced_summary_label = QLabel("Resolver: --\nAcquisition: --\nDiscovery anchor: --")
-        self.pc_storage_advanced_summary_label.setWordWrap(True)
-        advanced_layout.addWidget(self.pc_storage_advanced_summary_label)
-        advanced_layout.addWidget(self.pc_storage_resolver_status_label)
-        advanced_layout.addWidget(self.pc_storage_resolver_address_label)
-        advanced_layout.addLayout(pc_storage_baseline_row)
-        advanced_layout.addWidget(self.pc_storage_baseline_message_label)
-        pc_storage_cache_row = QHBoxLayout()
-        pc_storage_cache_row.addWidget(self.pc_storage_cache_status_label, 1)
-        pc_storage_cache_row.addWidget(self.pc_storage_retry_cache_button)
-        advanced_layout.addLayout(pc_storage_cache_row)
-        legacy_content = QWidget(advanced_content)
-        legacy_layout = QVBoxLayout(legacy_content)
-        legacy_layout.setContentsMargins(0, 0, 0, 0)
-        legacy_layout.addWidget(self.pc_storage_summary_label)
-        legacy_layout.addLayout(pc_storage_toolbar)
-        legacy_layout.addLayout(pc_sram_search_toolbar)
-        legacy_layout.addLayout(pc_save_file_layout)
-        legacy_layout.addLayout(pc_save_test_toolbar)
-        legacy_layout.addLayout(pc_storage_anchor_toolbar)
-        legacy_layout.addLayout(pc_storage_inspection_toolbar)
-        self.pc_storage_legacy_section = CollapsibleSection(
-            "Legacy diagnostics", legacy_content, expanded=False
-        )
-        advanced_layout.addWidget(self.pc_storage_legacy_section)
-        self.pc_storage_raw_section = CollapsibleSection(
-            "Show raw debug output", self.pc_storage_panes_splitter, expanded=False
-        )
-        advanced_layout.addWidget(self.pc_storage_raw_section)
-        self.pc_storage_advanced_section = CollapsibleSection(
-            "Advanced Diagnostics", advanced_content, expanded=False
-        )
-        pc_storage_layout.addWidget(self.pc_storage_advanced_section)
-        self.pc_storage_section = CollapsibleSection(
-            "PC Storage", pc_storage_content, expanded=True
-        )
-        debug_layout.addWidget(self.pc_storage_section)
-        self.ram_party_summary_label = QLabel("Party count: --")
-        self.ram_party_details = QPlainTextEdit()
-        self.ram_party_details.setReadOnly(True)
-        self.ram_party_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.ram_party_details.setPlaceholderText("Waiting for party memory payload.")
-        party_debug_content = QWidget(debug_page)
-        party_debug_layout = QVBoxLayout(party_debug_content)
-        party_debug_layout.setContentsMargins(0, 0, 0, 0)
-        party_debug_layout.addWidget(self.ram_party_summary_label)
-        party_debug_layout.addWidget(self.ram_party_details, 1)
-        self.ram_party_section = CollapsibleSection(
-            "Party snapshot", party_debug_content, expanded=True
-        )
-        debug_layout.addWidget(self.ram_party_section, 1)
-        self.ram_debug_scroll_area = self._scroll_page(debug_page)
-        self.main_tabs.addTab(self.ram_debug_scroll_area, "RAM Debug")
+        advanced = build_advanced_diagnostics(self)
+        self.diagnostics_view = DiagnosticsView(advanced, self._rediscover_pc_layout)
+        self.ram_debug_scroll_area = self.diagnostics_view.advanced_scroll_area
+        self.nuzlocke_view.rediscover_pc_requested.connect(self._rediscover_pc_layout)
+        self.compact_nuzlocke_view = CompactNuzlockeView(self.nuzlocke_view)
+        self.compact_nuzlocke_view.review_requested.connect(self._expand_nuzlocke)
+        self.compact_nuzlocke_view.rediscover_pc_requested.connect(self._rediscover_pc_layout)
         self.nuzlocke_scroll_area = self._scroll_page(self.nuzlocke_view)
-        self.main_tabs.addTab(self.nuzlocke_scroll_area, "Nuzlocke")
-        root_layout.addWidget(self.main_tabs, 1)
-        self.setCentralWidget(root)
+        for key, page in (
+            ("training", self.training_view), ("stats", self.party_stats_view),
+            ("nuzlocke", self.nuzlocke_scroll_area), ("diagnostics", self.diagnostics_view),
+            ("compact_training", self.compact_training_view),
+            ("compact_stats", self.compact_party_stats_view),
+            ("compact_nuzlocke", self.compact_nuzlocke_view),
+        ):
+            self.shell.add_page(key, page)
+        self.route = "training"
+        self.shell.show_route(self.route)
 
         status_bar = QStatusBar(self)
         status_bar.setObjectName("statusBar")
@@ -872,10 +448,219 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status_bar)
         self.tracker_status_message = _ElidedStatusLabel(status_bar)
         status_bar.addPermanentWidget(self.tracker_status_message, 1)
-        self._set_bottom_status(
-            connected=False,
-            info="Waiting for BizHawk / EmuHawk RAM connection...",
+        self._set_bottom_status(connected=False, info="Waiting for BizHawk / EmuHawk RAM connection...")
+
+    def _apply_game_capabilities(self) -> None:
+        caps = self.provider.capabilities
+        self.friendship_walk_group.setVisible(caps.friendship_walk)
+        self.start_friendship_walk_button.setEnabled(caps.friendship_walk)
+        self.stop_friendship_walk_button.setEnabled(caps.friendship_walk)
+        self.friendship_walk_shortcut.setEnabled(caps.friendship_walk)
+        if not (caps.live_opponents and caps.ev_yields):
+            self.recommendation_panel.empty.setText(
+                "Live battle EV recommendations unavailable for this game")
+        self.pc_storage_section.setVisible(caps.pc_storage)
+        self.coordinate_discovery_group.setVisible(caps.player_position)
+        self.nuzlocke_view.rediscover_pc_button.setVisible(caps.pc_storage)
+        self.nuzlocke_view.pc_panel.setVisible(caps.pc_storage)
+        self.compact_nuzlocke_view.rediscover_button.setVisible(caps.pc_storage)
+        self.compact_nuzlocke_view.pc_panel.setVisible(caps.pc_storage)
+        self.capability_status_label.setText(
+            f"PC Storage: {'Supported' if caps.pc_storage else 'Not available for this integration'}"
+            f" · Friendship Walk: {'Supported' if caps.friendship_walk else 'Not available'}"
+            f" · Battle opponent reader: {'Supported' if caps.live_opponents else 'Not available'}"
         )
+
+    def _show_unsupported_game_state(self) -> None:
+        message = "Unsupported game — the companion could not identify a supported Pokémon game."
+        self._set_bottom_status(connected=False, info=message)
+        self.shell.system_label.setText(message)
+        self.current_opponent_panel.set_unavailable()
+
+    def _select_party_slot(self, slot: int) -> None:
+        for view in self._party_views:
+            view.blockSignals(True)
+            view.set_selected_slot(slot)
+            view.blockSignals(False)
+
+    def _refresh_party_workspaces(self, connected=None) -> None:
+        if connected is None:
+            connected = self._training_party_connected
+        for card in self.tracker_party_cards.values():
+            pid = card.get("pid")
+            pokemon = card.get("pokemon")
+            decoded = getattr(pokemon, "decoded", None)
+            definition_for_id = (
+                self.provider.move_catalog
+                if self.provider.capabilities.move_metadata else None)
+            if pokemon is not None and pokemon.checksum_valid and decoded is not None:
+                move_ids = getattr(decoded, "move_ids", ())
+                current_pps = getattr(decoded, "move_current_pps", ())
+                pp_ups = getattr(decoded, "move_pp_ups", ())
+                card["move_displays"] = tuple(
+                    resolve_move(
+                        PokemonMoveState(move_id, current_pps[index], pp_ups[index]),
+                        definition_for_id or (lambda _move_id: None),
+                    ) if index < len(current_pps) and index < len(pp_ups) else None
+                    for index, move_id in enumerate(move_ids[:4])
+                )
+            else:
+                card["move_displays"] = ()
+            card["training_preference"] = (
+                self.training_preference_store.get(pid)
+                if pid is not None and card.get("pokemon") is not None else None
+            )
+        for view in self._party_views:
+            view.blockSignals(True)
+            view.refresh(self.tracker_party_cards, connected=connected)
+            view.blockSignals(False)
+        self._select_party_slot(self.training_view.selected_slot)
+        self.friendship_walk_group.refresh_party(self.tracker_party_cards)
+        self._render_friendship_walk()
+        self._refresh_training_recommendations(() if not connected else None)
+
+    def _refresh_fight_summaries(self) -> None:
+        timeline = self.nuzlocke_view.fight_timeline()
+        self.training_view.set_fight_timeline(timeline)
+        self.compact_training_view.set_fight_timeline(timeline)
+
+    def _handle_party_wipe(self, candidate: PartyWipeCandidate) -> None:
+        run = self.nuzlocke_view.store.active_run
+        if run is None or run.run_id != candidate.run_id:
+            return
+        action = self.settings.nuzlocke_wipe_action
+        if action == "IGNORE":
+            return
+        if action == "ASK ME":
+            box = QMessageBox(self)
+            box.setWindowTitle("Party Wipe Detected")
+            box.setText(f"All {len(candidate.members)} current party Pokémon fainted.")
+            box.setInformativeText("\n".join(
+                f"{member.nickname or member.species} · {member.species} · "
+                f"Lv. {member.level if member.level is not None else '—'}"
+                for member in candidate.members
+            ))
+            end_button = box.addButton("End Run as Wiped", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton("Keep Current Run", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("Dismiss", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is not end_button:
+                return
+        if not self.nuzlocke_view.end_run_wiped(candidate):
+            return
+        self._party_hp_observer.reset()
+        self._party_wipe_observer.reset()
+        self._no_run_prompt_observer.suppress_for_session()
+        box = QMessageBox(self)
+        box.setWindowTitle("Run Ended")
+        box.setText(f'"{run.name}" was marked WIPED. Start the next run?')
+        create_button = box.addButton("Create New Run", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is create_button:
+            self.nuzlocke_view._create_run()
+
+    def _prompt_create_run_without_active(self) -> None:
+        if self.nuzlocke_view.store.active_run is not None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("No Active Nuzlocke Run")
+        box.setText("You're playing without an active tracked Nuzlocke run.")
+        create_button = box.addButton("Create Run", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Not Now", QMessageBox.ButtonRole.RejectRole)
+        never_button = box.addButton("Don't Ask Again", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        if box.clickedButton() is never_button:
+            self.settings.prompt_for_nuzlocke_run = False
+            self.settings.save_default()
+            self.nuzlocke_view.no_run_prompt_input.setChecked(False)
+        elif box.clickedButton() is create_button:
+            self.nuzlocke_view._create_run()
+
+    def _refresh_training_recommendations(self, opponents=None) -> None:
+        if not (self.provider.capabilities.live_opponents and self.provider.capabilities.ev_yields):
+            self._training_opponent_yields = ()
+            self._training_battle_state = "unavailable"
+            self.training_recommendations = {}
+            self.recommendation_panel.refresh(
+                self.tracker_party_cards, {}, battle_state="unavailable")
+            return
+        if opponents is not None:
+            yields = tuple(self.provider.get_training_ev_yield(enemy.species_id) for enemy in opponents)
+            self._training_opponent_yields = yields
+            self._training_battle_state = (
+                "unavailable" if any(value is None for value in yields) else
+                "active" if any(any(value.as_mapping().values()) for value in yields) else "idle"
+            )
+        self.training_recommendations = {
+            slot: recommend_battle_evs(card.get("training_preference"), self._training_opponent_yields)
+            for slot, card in self.tracker_party_cards.items()
+            if self._training_battle_state == "active"
+            and (pokemon := card.get("pokemon")) is not None
+            and pokemon.checksum_valid
+        }
+        self.recommendation_panel.refresh(
+            self.tracker_party_cards, self.training_recommendations,
+            battle_state=self._training_battle_state,
+        )
+
+    def _edit_training_focus(self, slot: int) -> None:
+        card = self.tracker_party_cards.get(slot, {})
+        pokemon, pid = card.get("pokemon"), card.get("pid")
+        if pokemon is None or pid is None or not pokemon.checksum_valid:
+            return
+        title = (pokemon.species if self.provider.nickname_is_default(pokemon.nickname, pokemon.species)
+                 else f"{pokemon.nickname} ({pokemon.species})")
+        # Qt continues polling during the dialog. Save the captured identity, then
+        # project preferences onto the current party, which may have reordered.
+        dialog = TrainingFocusDialog(title, self.training_preference_store.get(pid), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self.training_preference_store.set(pid, dialog.preference())
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Could not save training focus", str(error))
+            return
+        self._refresh_party_workspaces()
+
+    def _clear_training_focus(self, slot: int) -> None:
+        card = self.tracker_party_cards.get(slot, {})
+        pokemon, pid = card.get("pokemon"), card.get("pid")
+        if pokemon is None or pid is None or not pokemon.checksum_valid:
+            return
+        try:
+            self.training_preference_store.clear(pid)
+        except OSError as error:
+            QMessageBox.warning(self, "Could not clear training focus", str(error))
+            return
+        self._refresh_party_workspaces()
+
+    def set_route(self, route: str, persist: bool = True) -> None:
+        if route not in {"training", "stats", "nuzlocke", "diagnostics"}:
+            raise ValueError(f"Unknown workspace: {route}")
+        if self.compact_mode and route == "diagnostics":
+            route = self.tracker_view
+        if persist and self.compact_mode:
+            self._compact_return_route = None
+        self.route = route
+        if route in {"training", "stats"}:
+            self.tracker_view = route
+            if persist:
+                self.settings.tracker_view = route
+        self.shell.show_route(route)
+        self.ev_change_log.setVisible(route == "training")
+        if persist:
+            self.settings.workspace_view = route
+            self.settings.save_default()
+
+    def _expand_nuzlocke(self, section: str) -> None:
+        self.set_compact_mode(False)
+        self.set_route("nuzlocke")
+        self.nuzlocke_view.show_section(section)
+
+    def _review_detection(self) -> None:
+        self._expand_nuzlocke(
+            "Deaths" if not self.nuzlocke_view.ram_death_group.isHidden() else "Encounters")
 
     @staticmethod
     def _scroll_page(content: QWidget) -> QScrollArea:
@@ -890,126 +675,21 @@ class MainWindow(QMainWindow):
         scroll.setWidget(content)
         return scroll
 
-    def _build_coordinate_discovery(self, parent_layout, parent) -> None:
-        group = QGroupBox("Advanced Coordinate Discovery", parent)
-        group.setCheckable(True)
-        group.setChecked(False)
-        self.coordinate_discovery_group = group
-        layout = QVBoxLayout(group)
-        contents = QWidget(group)
-        contents.setVisible(False)
-        self.coordinate_discovery_contents = contents
-        contents_layout = QVBoxLayout(contents)
-        contents_layout.setContentsMargins(0, 0, 0, 0)
-        group.toggled.connect(contents.setVisible)
-        range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("Main RAM offset"))
-        self.coordinate_scan_start = QLineEdit("0x00000000")
-        self.coordinate_scan_start.setMaximumWidth(120)
-        self.coordinate_scan_start.setToolTip("Byte offset within BizHawk's Main RAM domain")
-        range_row.addWidget(self.coordinate_scan_start)
-        range_row.addWidget(QLabel("Length"))
-        self.coordinate_scan_length = QLineEdit("0x00400000")
-        self.coordinate_scan_length.setMaximumWidth(120)
-        self.coordinate_scan_length.setToolTip("Even byte length, up to 4 MiB")
-        range_row.addWidget(self.coordinate_scan_length)
-        range_row.addStretch(1)
-        contents_layout.addLayout(range_row)
-
-        capture_row = QHBoxLayout()
-        self.coordinate_capture_buttons = {}
-        for label, title in (
-            ("baseline", "Baseline + Idle"),
-            ("right", "Right"),
-            ("left", "Left"),
-            ("down", "Down"),
-            ("up", "Up"),
-        ):
-            button = QPushButton(title)
-            button.setToolTip(
-                "Capture Baseline + Idle Check" if label == "baseline" else f"Capture {title}"
-            )
-            button.clicked.connect(
-                lambda _checked=False, capture_label=label: self._start_coordinate_capture(
-                    capture_label
-                )
-            )
-            self.coordinate_capture_buttons[label] = button
-            capture_row.addWidget(button)
-        contents_layout.addLayout(capture_row)
-
-        result_row = QHBoxLayout()
-        result_row.addWidget(QLabel("Top coordinate pairs"))
-        self.coordinate_candidate_combo = QComboBox()
-        self.coordinate_candidate_combo.addItem("Capture all six samples first", None)
-        self.coordinate_candidate_combo.currentIndexChanged.connect(
-            self._select_coordinate_candidate
-        )
-        result_row.addWidget(self.coordinate_candidate_combo, 1)
-        contents_layout.addLayout(result_row)
-
-        self.coordinate_discovery_status = QLabel(
-            "Validated player coordinates are read at Main RAM offsets "
-            "0x001C5AFE / 0x001C5B02. This advanced scanner remains available for diagnostics."
-        )
-        self.coordinate_discovery_status.setWordWrap(True)
-        contents_layout.addWidget(self.coordinate_discovery_status)
-        self.coordinate_candidate_details = QLabel("No coordinate pair selected.")
-        self.coordinate_candidate_details.setWordWrap(True)
-        contents_layout.addWidget(self.coordinate_candidate_details)
-        self.coordinate_live_preview = QLabel("Live X: --    Live Y: --")
-        contents_layout.addWidget(self.coordinate_live_preview)
-        layout.addWidget(contents)
-        parent_layout.addWidget(group)
-
     def _build_friendship_walk(self, parent) -> None:
-        group = QWidget(parent)
-        group.setObjectName("friendshipWalk")
-        group.setToolTip("Use only in a safe area you have manually confirmed is encounter-free.")
-        layout = QVBoxLayout(group)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
-        heading = QLabel("Friendship Walk")
-        heading.setProperty("uiRole", "sectionHeading")
-        layout.addWidget(heading)
-        control_row = QHBoxLayout()
-        control_row.setContentsMargins(0, 0, 0, 0)
-        control_row.setSpacing(7)
-        control_row.addWidget(QLabel("Mode"))
-        self.friendship_walk_axis = QComboBox()
-        self.friendship_walk_axis.addItem("Horizontal", WalkAxis.HORIZONTAL.value)
-        self.friendship_walk_axis.addItem("Vertical", WalkAxis.VERTICAL.value)
+        panel = FriendshipWalkPanel(parent)
+        self.friendship_walk_group = panel
+        self.friendship_walk_axis = panel.axis
         self.friendship_walk_axis.setCurrentIndex(
-            max(0, self.friendship_walk_axis.findData(self.settings.friendship_walk_axis))
-        )
+            max(0, panel.axis.findData(self.settings.friendship_walk_axis)))
         self.friendship_walk_axis.currentIndexChanged.connect(self._friendship_walk_axis_changed)
-        control_row.addWidget(self.friendship_walk_axis)
-        self.start_friendship_walk_button = QPushButton("Start Friendship Walk")
-        self.start_friendship_walk_button.setProperty("buttonRole", "primary")
+        self.start_friendship_walk_button = panel.start
         self.start_friendship_walk_button.clicked.connect(self._start_friendship_walk)
-        control_row.addWidget(self.start_friendship_walk_button)
-        self.stop_friendship_walk_button = QPushButton("Stop")
-        self.stop_friendship_walk_button.setProperty("buttonRole", "danger")
-        self.stop_friendship_walk_button.setToolTip("Immediately stop automatic walking")
+        self.stop_friendship_walk_button = panel.stop
         self.stop_friendship_walk_button.clicked.connect(self._stop_friendship_walk)
-        control_row.addWidget(self.stop_friendship_walk_button)
-        control_row.addStretch(1)
-        layout.addLayout(control_row)
-
-        status_row = QHBoxLayout()
-        status_row.setContentsMargins(0, 0, 0, 0)
-        status_row.setSpacing(7)
-        self.friendship_walk_status_label = QLabel("Idle")
-        self.friendship_walk_status_label.setMinimumWidth(0)
-        self.friendship_walk_status_label.setProperty("walkState", "idle")
-        status_row.addWidget(self.friendship_walk_status_label)
-        status_row.addStretch(1)
-        self.friendship_walk_moves_label = QLabel("Movement changes: 0")
-        self.friendship_walk_moves_label.setProperty("uiRole", "muted")
-        status_row.addWidget(self.friendship_walk_moves_label)
-        layout.addLayout(status_row)
-        self.tracker_layout.addWidget(group)
-        self.friendship_walk_group = group
+        self.friendship_walk_status_label = panel.status
+        self.friendship_walk_moves_label = panel.moves
+        panel.tracked_changed.connect(self._friendship_tracked_changed)
+        panel.goal_changed.connect(self._friendship_goal_changed)
         self.friendship_walk_shortcut = QShortcut(QKeySequence("Ctrl+Shift+W"), self)
         self.friendship_walk_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.friendship_walk_shortcut.activated.connect(self._stop_friendship_walk)
@@ -1021,13 +701,67 @@ class MainWindow(QMainWindow):
         self.settings.friendship_walk_axis = axis
         self.settings.save_default()
 
+    def _friendship_tracked_changed(self, identity) -> None:
+        if identity is None:
+            return
+        rules = self.provider.friendship_rules
+        goal = self.settings.friendship_goals.get(
+            str(identity), rules.default_goal if rules else 160,
+        )
+        self.friendship_walk_group.set_goal(
+            goal, evolution_goal=rules.evolution_goal if rules else 220,
+        )
+        pokemon = self.friendship_walk_group.selected_pokemon
+        if self._walk_session is not None and self._walk_session_identity != identity:
+            self._walk_session_identity = identity
+            if pokemon is not None and pokemon.checksum_valid:
+                self._walk_session.retarget(pokemon.friendship)
+        self._walk_tracked_missing = False
+        self._walk_target_reached = False
+        if (pokemon is not None and pokemon.checksum_valid
+                and pokemon.friendship >= goal
+                and (self.friendship_walk.active or self._friendship_walk_pending_sequence is not None)):
+            self._complete_friendship_goal()
+            return
+        self._render_friendship_walk()
+
+    def _friendship_goal_changed(self, target: int) -> None:
+        identity = self.friendship_walk_group.selected_identity
+        if identity is not None:
+            self.settings.friendship_goals[str(identity)] = FriendshipGoal(target).target
+            self.settings.save_default()
+        pokemon = self.friendship_walk_group.selected_pokemon
+        if (pokemon is not None and pokemon.checksum_valid
+                and pokemon.friendship >= target
+                and (self.friendship_walk.active or self._friendship_walk_pending_sequence is not None)):
+            self._complete_friendship_goal()
+        else:
+            self._walk_target_reached = False
+            self._render_friendship_walk()
+            if pokemon is not None and pokemon.checksum_valid and pokemon.friendship < target:
+                self.start_friendship_walk_button.setEnabled(True)
+
+    def _complete_friendship_goal(self) -> None:
+        if self._walk_target_reached:
+            return
+        if self.friendship_walk.active or self._friendship_walk_pending_sequence is not None:
+            self._stop_friendship_walk()
+        self._walk_target_reached = True
+        self._render_friendship_walk()
+
     def _start_friendship_walk(self) -> None:
         if self.friendship_walk.active or self._friendship_walk_pending_sequence is not None:
+            return
+        pokemon = self.friendship_walk_group.selected_pokemon
+        goal = self.friendship_walk_group.goal
+        if pokemon is not None and pokemon.checksum_valid and pokemon.friendship >= goal:
+            self._walk_target_reached = True
+            self._render_friendship_walk()
             return
         snapshot = self.ram_data_source.snapshot()
         party_payload = snapshot.details.get("party_payload")
         payload = party_payload.payload if party_payload is not None else {}
-        position = decode_player_position(payload)
+        position = self.provider.decode_player_position(payload)
         frame = _frame_number(payload)
         active_enemies = snapshot.details.get("active_enemy_battlers", ())
         if party_payload is None or not snapshot.details.get("party_payload_fresh", False):
@@ -1053,6 +787,17 @@ class MainWindow(QMainWindow):
             self._render_friendship_walk()
             return
         self._remote_walk_stop_requested = False
+        if (self._walk_session is None or self._walk_session_ended
+                or self._walk_session_identity != self.friendship_walk_group.selected_identity):
+            self._walk_session = FriendshipWalkSessionStats(
+                started_at=now,
+                starting_friendship=pokemon.friendship if pokemon is not None else 0,
+                current_friendship=pokemon.friendship if pokemon is not None else 0,
+            )
+        self._walk_session_ended = False
+        self._walk_session_identity = self.friendship_walk_group.selected_identity
+        self._walk_target_reached = False
+        self._walk_tracked_missing = False
         self._friendship_walk_start_frame = frame
         self._friendship_walk_pending_sequence = receipt.sequence
         self._friendship_walk_pending_axis = axis
@@ -1066,9 +811,18 @@ class MainWindow(QMainWindow):
         self._friendship_walk_pending_sequence = None
         self._friendship_walk_pending_axis = None
         self.friendship_walk.stop()
+        self._walk_session_ended = True
         receipt = self._send_friendship_walk_command("STOP")
         self._walk_command_state = "WAITING FOR STOP ACK" if receipt else "UNAVAILABLE"
+        if self._walk_session is not None:
+            self._walk_session.observe(time.monotonic(), active=False)
         self._render_friendship_walk()
+        pokemon = self.friendship_walk_group.selected_pokemon
+        self.start_friendship_walk_button.setEnabled(
+            pokemon is not None and pokemon.checksum_valid
+            and pokemon.friendship < self.friendship_walk_group.goal
+            and not self._walk_tracked_missing
+        )
 
     def _send_friendship_walk_command(
         self, action: str, value: str | None = None
@@ -1105,12 +859,52 @@ class MainWindow(QMainWindow):
     def _refresh_friendship_walk(self, snapshot, party_payload, active_enemies) -> None:
         frame = _frame_number(party_payload.payload if party_payload is not None else {})
         payload = party_payload.payload if party_payload is not None else {}
-        position = decode_player_position(payload)
+        position = self.provider.decode_player_position(payload)
         self._observe_friendship_walk_ack(payload)
         ram_fresh = bool(
             party_payload is not None
             and snapshot.details.get("party_payload_fresh", False)
         )
+        raw_party_state = snapshot.details.get("party_state")
+        fresh_pokemon = None
+        if (self._walk_session is not None and self._walk_session_identity is not None
+                and ram_fresh and raw_party_state is not None
+                and getattr(raw_party_state, "party_count_valid", False)):
+            tracked_record = next(
+                (p for p in raw_party_state.pokemon
+                 if p.stable_id == self._walk_session_identity),
+                None,
+            )
+            if tracked_record is None:
+                self._walk_tracked_missing = True
+                if self.friendship_walk.active:
+                    self.friendship_walk.pause(WalkStatus.PAUSED_RAM)
+                    self._send_friendship_walk_command("STOP")
+                elif self._friendship_walk_pending_sequence is not None:
+                    self._stop_friendship_walk()
+                self._walk_session.observe(time.monotonic(), active=False)
+                self._render_friendship_walk()
+                self.start_friendship_walk_button.setEnabled(False)
+                return
+            if not tracked_record.checksum_valid:
+                if self.friendship_walk.active or self._friendship_walk_pending_sequence is not None:
+                    self._friendship_walk_pending_sequence = None
+                    self._friendship_walk_pending_axis = None
+                    self.friendship_walk.pause(WalkStatus.PAUSED_RAM)
+                    self._send_friendship_walk_command("STOP")
+                self._walk_session.observe(time.monotonic(), active=False)
+                self._render_friendship_walk()
+                self.start_friendship_walk_button.setEnabled(False)
+                return
+            fresh_pokemon = tracked_record
+            self._walk_tracked_missing = False
+            self._walk_session.current_friendship = fresh_pokemon.friendship
+            if fresh_pokemon.friendship >= self.friendship_walk_group.goal:
+                self._walk_session.observe(time.monotonic(), active=False,
+                                           friendship=fresh_pokemon.friendship)
+                self._complete_friendship_goal()
+                self.start_friendship_walk_button.setEnabled(False)
+                return
 
         if self._friendship_walk_pending_sequence is not None:
             if not ram_fresh:
@@ -1168,6 +962,8 @@ class MainWindow(QMainWindow):
             if frame is None:
                 self.friendship_walk.pause(WalkStatus.PAUSED_COORDINATES)
                 self._send_friendship_walk_command("STOP")
+                if self._walk_session is not None:
+                    self._walk_session.observe(time.monotonic(), active=False)
                 self._render_friendship_walk()
                 self.start_friendship_walk_button.setEnabled(
                     ram_fresh
@@ -1228,6 +1024,19 @@ class MainWindow(QMainWindow):
                 self._remote_walk_stop_requested = True
         else:
             self._remote_walk_stop_requested = False
+        if self._walk_session is not None:
+            self._walk_session.observe(
+                time.monotonic(),
+                active=(self.friendship_walk.active and ram_fresh
+                        and self.friendship_walk.status is not WalkStatus.BLOCKED_REVERSING),
+                friendship=fresh_pokemon.friendship if fresh_pokemon is not None else None,
+                controller_moves=self.friendship_walk.successful_moves,
+                reversal_frame=(
+                    self.friendship_walk.reversal_start_frame
+                    if self.friendship_walk.status is WalkStatus.BLOCKED_REVERSING
+                    else None
+                ),
+            )
         self._render_friendship_walk()
         self.start_friendship_walk_button.setEnabled(
             not self.friendship_walk.active
@@ -1236,6 +1045,11 @@ class MainWindow(QMainWindow):
             and position is not None
             and position.validated_offsets
             and not active_enemies
+            and not self._walk_target_reached
+            and not self._walk_tracked_missing
+            and self.friendship_walk_group.selected_pokemon is not None
+            and self.friendship_walk_group.selected_pokemon.friendship
+            < self.friendship_walk_group.goal
         )
 
     def _render_friendship_walk(self) -> None:
@@ -1244,11 +1058,44 @@ class MainWindow(QMainWindow):
             if self._friendship_walk_pending_sequence is not None
             else self.friendship_walk.status.value
         )
-        self.friendship_walk_status_label.setText(status)
-        self.friendship_walk_moves_label.setText(
-            f"Movement changes: {self.friendship_walk.successful_moves}"
+        pokemon = self.friendship_walk_group.selected_pokemon
+        current = (pokemon.friendship if pokemon is not None and pokemon.checksum_valid
+                   else None)
+        target = self.friendship_walk_group.goal
+        if self._walk_tracked_missing:
+            status = "Tracked Pokémon left party"
+        elif self._walk_target_reached or (
+            current is not None and current >= target
+            and not self.friendship_walk.active
+            and self._friendship_walk_pending_sequence is None
+            and self.friendship_walk.status is WalkStatus.IDLE
+        ):
+            status = "Goal reached"
+        rules = self.provider.friendship_rules
+        eta = None
+        if rules is not None and current is not None:
+            if self._walk_session is not None:
+                self._walk_session.current_friendship = current
+                eta = self._walk_session.eta(
+                    FriendshipGoal(target), rules,
+                    paused=(not self.friendship_walk.active
+                            and self._friendship_walk_pending_sequence is None
+                            and self.friendship_walk.status is not WalkStatus.IDLE),
+                )
+            elif current >= target:
+                eta = FriendshipETA(ETAStatus.REACHED, 0, 0, "high")
+        if status == WalkStatus.IDLE.value and self._walk_session_ended:
+            eta = FriendshipETA(ETAStatus.READY)
+        self.friendship_walk_group.render_training(
+            status=status, current=current, target=target,
+            eta=eta, session=self._walk_session,
         )
         walk_state = (
+            "reached"
+            if status == "Goal reached"
+            else "paused"
+            if status == "Tracked Pokémon left party"
+            else
             "active"
             if self.friendship_walk.active
             else "pending"
@@ -1266,73 +1113,39 @@ class MainWindow(QMainWindow):
     def set_tracker_view(self, view: str, persist: bool = True) -> None:
         if view not in {"training", "stats"}:
             raise ValueError("Tracker view must be 'training' or 'stats'.")
-        self.tracker_view = view
-        for key, button in self.tracker_view_buttons.items():
-            button.blockSignals(True)
-            button.setChecked(key == view)
-            button.blockSignals(False)
-        training_visible = view == "training"
-        for card in self.tracker_party_cards.values():
-            card["training_content"].setVisible(training_visible)
-            card["stats_content"].setVisible(not training_visible)
-        self.ev_change_log.setVisible(training_visible)
-        if self.compact_mode:
-            QTimer.singleShot(
-                0,
-                lambda: self._resize_compact_window(max(self._compact_member_count, 1)),
-            )
-        if persist:
-            self.settings.tracker_view = view
-            self.settings.save_default()
+        self.set_route(view, persist=persist)
 
     def _set_compact_mode(self, enabled: bool, persist: bool = True, initial: bool = False) -> None:
         if enabled == self.compact_mode and not initial:
             return
         was_visible = self.isVisible()
         self._changing_mode = True
-        if enabled:
-            self._pre_compact_tab_index = self.main_tabs.currentIndex()
-            if not initial:
-                self.settings.normal_window_geometry = self._current_window_geometry()
-            self.compact_mode = True
-            self.setMinimumSize(QSize(320, 300))
-            self.party_grid.set_compact_layout(True)
-            self.main_tabs.setTabVisible(1, False)
-            self.main_tabs.setTabVisible(2, False)
-            self.main_tabs.setCurrentIndex(0)
-            self.main_tabs.tabBar().hide()
-            self.tracker_title.hide()
-            self.ev_change_list.setMinimumHeight(112)
-            self.ev_change_list.setMaximumHeight(140)
-            self._root_layout.setContentsMargins(4, 3, 4, 3)
-            self._root_layout.setSpacing(3)
-            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            if not initial:
-                self._resize_compact_window(max(self._compact_member_count, 1))
-        else:
-            self.compact_mode = False
-            self.setMinimumSize(QSize(620, 480))
-            self.party_grid.set_compact_layout(False)
-            self.main_tabs.setTabVisible(1, True)
-            self.main_tabs.setTabVisible(2, True)
-            self.main_tabs.tabBar().show()
-            self.tracker_title.show()
-            self.ev_change_list.setMinimumHeight(150)
-            self.ev_change_list.setMaximumHeight(230)
-            self._root_layout.setContentsMargins(8, 7, 8, 7)
-            self._root_layout.setSpacing(6)
-            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
-            self.main_tabs.setCurrentIndex(min(self._pre_compact_tab_index, 2))
-            if self.settings.normal_window_geometry is not None:
+        route = self.route
+        if enabled and route == "diagnostics":
+            self._compact_return_route = route
+            route = self.tracker_view
+        elif not enabled and self._compact_return_route:
+            route = self._compact_return_route
+            self._compact_return_route = None
+        if enabled and not initial:
+            self.settings.normal_window_geometry = self._current_window_geometry()
+        self.compact_mode = enabled
+        self.setMinimumSize(QSize(320, 300) if enabled else QSize(620, 480))
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
+        self.shell.set_compact(enabled)
+        training = self.compact_training_view if enabled else self.training_view
+        training.set_runtime_widgets(
+            opponent=self.current_opponent_panel, recommendations=self.recommendation_panel,
+            history=self.ev_change_log, friendship=self.friendship_walk_group)
+        self.set_route(route, persist=False)
+        if not initial:
+            if enabled:
+                self._resize_compact_window(self._compact_member_count)
+            elif self.settings.normal_window_geometry is not None:
                 self.setGeometry(*self.settings.normal_window_geometry)
-        self.compact_mode_button.setChecked(enabled)
-        for card in self.tracker_party_cards.values():
-            pokemon = card["pokemon"]
-            if pokemon is not None:
-                self._refresh_tracker_stats_metadata(card, pokemon)
-        self.ev_change_log.render(self._ev_history_records, self.compact_mode)
-        # Changing window flags hides a visible QWidget; use its state from before
-        # the transition so compact mode does not make the app disappear.
+        self.ev_change_log.render(self._ev_history_records, enabled)
+        if not self.provider.capabilities.friendship_walk:
+            self.friendship_walk_group.hide()
         if was_visible:
             self.show()
         self._changing_mode = False
@@ -1341,23 +1154,8 @@ class MainWindow(QMainWindow):
             self.settings.save_default()
 
     def _resize_compact_window(self, member_count: int) -> None:
-        columns = min(max(int(member_count), 1), 3)
-        width = max(
-            320,
-            PartyCardSize.SMALL.preferred_width * columns
-            + self.party_grid.HORIZONTAL_SPACING * (columns - 1)
-            + 40,
-        )
-        rows = 1 if member_count <= 3 else 2
-        card_height = 210 if self.tracker_view == "training" else 230
-        height = (
-            166
-            + rows * card_height
-            + self.current_opponent_panel.sizeHint().height()
-            + self.friendship_walk_group.sizeHint().height()
-            + self.statusBar().height()
-        )
-        self.resize(width, height)
+        # Purpose-built HUD geometry is independent of the number of full cards.
+        self.resize(720, 620)
 
     def _current_window_geometry(self) -> tuple[int, int, int, int]:
         geometry = self.geometry()
@@ -1385,6 +1183,15 @@ class MainWindow(QMainWindow):
 
     def _refresh_ram_backend_debug(self) -> None:
         snapshot = self.ram_data_source.snapshot()
+        if "active_enemy_battlers" not in snapshot.details:
+            self.backend_status.set_connection(
+                snapshot.backend_name, snapshot.connected, None, None)
+            self._set_bottom_status(
+                connected=snapshot.connected,
+                info="Waiting for a compatible live party snapshot."
+                if self.provider.capabilities.live_party else "Live party unavailable for this game.",
+            )
+            return
         heartbeat = snapshot.details.get("heartbeat")
         party_state = snapshot.details.get("party_state")
         display_party_state = snapshot.details.get("display_party_state", party_state)
@@ -1413,9 +1220,15 @@ class MainWindow(QMainWindow):
         pc_storage_monitor_debug = snapshot.details.get("pc_storage_monitor_debug")
         self._poll_coordinate_discovery(party_payload)
         battle_battlers = snapshot.details.get("battle_battlers", ())
-        active_enemies = snapshot.details["active_enemy_battlers"]
-        acquisition_run = self.nuzlocke_view.store.active_run
+        active_enemies = (
+            snapshot.details["active_enemy_battlers"]
+            if self.provider.capabilities.live_opponents else ())
+        acquisition_run = (
+            self.nuzlocke_view.store.active_run
+            if self.provider.capabilities.nuzlocke else None)
         pc_storage_ready = (
+            self.provider.capabilities.pc_storage
+            and
             snapshot.connected
             and pc_storage_state is not None
             and pc_storage_state.available
@@ -1433,10 +1246,11 @@ class MainWindow(QMainWindow):
             else {}
         )
         current_lua_run = party_payload_data.get("run_id") or pc_payload_data.get("lua_run_id")
-        self._maybe_auto_discover_pc_layout(
-            snapshot.connected, current_lua_run, pc_payload_data,
-            pc_storage_discovery_progress,
-        )
+        if self.provider.capabilities.pc_storage:
+            self._maybe_auto_discover_pc_layout(
+                snapshot.connected, current_lua_run, pc_payload_data,
+                pc_storage_discovery_progress,
+            )
         pc_storage_acquisition_ready = pc_storage_ready and (
             pc_payload_data.get("pc_storage_resolver_kind") != "session_pc_cache"
             or (
@@ -1452,20 +1266,17 @@ class MainWindow(QMainWindow):
         )
         party_snapshot_valid = snapshot.connected and _valid_acquisition_snapshot(party_state)
         party_acquisition_candidates = tuple(
-            _acquisition_candidate(pokemon)
+            self.provider.party_acquisition_candidate(pokemon)
             for pokemon in getattr(party_state, "pokemon", ())
-        )
+        ) if self.provider.capabilities.nuzlocke else ()
         boxed_pokemon = pc_storage_stable_pokemon if pc_storage_ready else ()
-        self._refresh_pc_save_offset_test(
-            pc_save_offset_test_payload,
-            pc_save_offset_test_status,
-        )
-        self._refresh_pc_sram_search(
-            pc_sram_search_payload,
-            pc_sram_search_status,
-        )
+        if self.provider.capabilities.pc_storage:
+            self._refresh_pc_save_offset_test(
+                pc_save_offset_test_payload, pc_save_offset_test_status)
+            self._refresh_pc_sram_search(
+                pc_sram_search_payload, pc_sram_search_status)
         boxed_acquisition_candidates = (
-            tuple(_boxed_acquisition_candidate(pokemon) for pokemon in boxed_pokemon)
+            tuple(self.provider.boxed_acquisition_candidate(pokemon) for pokemon in boxed_pokemon)
             if pc_storage_acquisition_ready
             else ()
         )
@@ -1479,7 +1290,7 @@ class MainWindow(QMainWindow):
                 )
                 inferred_location = None
                 if candidate is not None:
-                    _, _, location_id = classify_platinum_acquisition(
+                    _, _, location_id = self.provider.classify_acquisition(
                         candidate, acquisition_run
                     )
                     if acquisition_run is not None and location_id in acquisition_run.encounters:
@@ -1564,8 +1375,8 @@ class MainWindow(QMainWindow):
                 valid_snapshot=party_snapshot_valid,
                 run=acquisition_run,
                 store=self.nuzlocke_view.store,
-                classify=classify_platinum_acquisition,
-                classify_first_party=lambda candidate, run: classify_platinum_acquisition(
+                classify=self.provider.classify_acquisition,
+                classify_first_party=lambda candidate, run: self.provider.classify_acquisition(
                     candidate, run, first_party_member=True
                 ),
             )
@@ -1575,7 +1386,7 @@ class MainWindow(QMainWindow):
                 valid_snapshot=pc_storage_acquisition_ready,
                 run=acquisition_run,
                 store=self.nuzlocke_view.store,
-                classify=classify_platinum_acquisition,
+                classify=self.provider.classify_acquisition,
             )
             new_acquisitions = (*party_acquisitions, *boxed_acquisitions)
             self._pc_storage_emitted_box_ids.update(
@@ -1668,23 +1479,19 @@ class MainWindow(QMainWindow):
             self._pc_resolver_lifecycle = "cache-pending"
         else:
             self._pc_resolver_lifecycle = "unresolved"
-        self._refresh_pc_storage_debug(
-            pc_storage_state,
-            pc_storage_payload,
-            pc_storage_fresh,
-            boxed_pokemon,
-            pc_storage_changes,
-            pc_storage_discovery_payload,
-            pc_storage_discovery_progress,
-            pc_storage_monitor_debug,
-            pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
-        )
-        self._refresh_pc_storage_compact_status(
-            snapshot.connected, pc_storage_state, pc_payload_data,
-            pc_storage_discovery_payload, pc_storage_discovery_progress,
-            pc_storage_monitor_debug,
-            pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
-        )
+        if self.provider.capabilities.pc_storage:
+            self._refresh_pc_storage_debug(
+                pc_storage_state, pc_storage_payload, pc_storage_fresh,
+                boxed_pokemon, pc_storage_changes, pc_storage_discovery_payload,
+                pc_storage_discovery_progress, pc_storage_monitor_debug,
+                pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
+            )
+            self._refresh_pc_storage_compact_status(
+                snapshot.connected, pc_storage_state, pc_payload_data,
+                pc_storage_discovery_payload, pc_storage_discovery_progress,
+                pc_storage_monitor_debug,
+                pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
+            )
         payload_data = party_payload.payload if party_payload is not None else {}
         stale_after = getattr(
             getattr(self.ram_data_source, "server", None), "stale_after_seconds", 5.0
@@ -1694,7 +1501,8 @@ class MainWindow(QMainWindow):
             PartyHpSample(
                 stable_id=pokemon.stable_id,
                 species=pokemon.species,
-                nickname=_acquisition_candidate(pokemon).nickname,
+                nickname=(self.provider.party_acquisition_candidate(pokemon).nickname
+                          if self.provider.capabilities.nuzlocke else pokemon.nickname),
                 level=pokemon.level,
                 current_hp=pokemon.current_hp,
                 met_location_id=pokemon.met_location_id,
@@ -1704,21 +1512,39 @@ class MainWindow(QMainWindow):
             )
             for pokemon in getattr(party_state, "pokemon", ())
         )
+        stream_identity = tuple(
+            payload_data.get(key) for key in ("run_id", "core", "domain", "pointer_value")
+        )
+        frame = _frame_number(payload_data)
         death_candidates = self._party_hp_observer.observe(
             hp_samples,
             connected=snapshot.connected,
             valid_snapshot=valid_death_snapshot,
             run_id=acquisition_run.run_id if acquisition_run else None,
-            stream_identity=tuple(
-                payload_data.get(key) for key in ("run_id", "core", "domain", "pointer_value")
-            ),
-            frame=_frame_number(payload_data),
+            stream_identity=stream_identity,
+            frame=frame,
         )
         if death_candidates:
             self.nuzlocke_view.receive_ram_death_candidates(
                 acquisition_run.run_id if acquisition_run else None,
                 death_candidates,
             )
+        wipe = self._party_wipe_observer.observe(
+            hp_samples, connected=snapshot.connected,
+            valid_snapshot=valid_death_snapshot,
+            run_id=acquisition_run.run_id if acquisition_run else None,
+            stream_identity=stream_identity, frame=frame,
+        )
+        if wipe:
+            self._handle_party_wipe(wipe)
+        if self._no_run_prompt_observer.observe(
+            connected=snapshot.connected, valid_snapshot=valid_death_snapshot,
+            party_size=len(hp_samples), active_run=acquisition_run is not None,
+            stream_identity=stream_identity, frame=frame,
+            enabled=(self.settings.prompt_for_nuzlocke_run
+                     and self.provider.capabilities.nuzlocke),
+        ):
+            self._prompt_create_run_without_active()
         age = max(0.0, time.monotonic() - heartbeat.received_at) if heartbeat else None
         self.backend_status.set_connection(
             snapshot.backend_name, snapshot.connected, heartbeat, age
@@ -1761,19 +1587,42 @@ class MainWindow(QMainWindow):
             len(active_enemies),
             opponent_summary,
         )
-        self.current_opponent_panel.set_opponents(active_enemies)
-        self._refresh_friendship_walk(snapshot, party_payload, active_enemies)
-        opponent_count = len(active_enemies)
-        if self.compact_mode and opponent_count != self._compact_opponent_count:
-            self._compact_opponent_count = opponent_count
-            QTimer.singleShot(
-                0,
-                lambda: self._resize_compact_window(max(self._compact_member_count, 1)),
-            )
+        if self.provider.capabilities.live_opponents:
+            self.current_opponent_panel.set_opponents(active_enemies)
+        if self.provider.capabilities.friendship_walk:
+            self._refresh_friendship_walk(snapshot, party_payload, active_enemies)
+        self._refresh_training_recommendations(active_enemies if snapshot.connected else ())
+        self.diagnostics_view.refresh(snapshot, {
+            "game_name": self.profile.display_name,
+            "command_state": self._walk_command_state,
+            "pc_status": self.pc_storage_status_label.text(),
+            "pc_layout": self.pc_storage_layout_label.text(),
+            "boxed_count": self.pc_storage_occupied_label.text(),
+            "acquisition_status": self.pc_storage_catch_status_label.text(),
+            "pc_event": self.pc_storage_last_event_label.text(),
+            "recovery_message": self.pc_storage_recovery_label.text(),
+            "rediscover_enabled": self.pc_discover_current_layout_button.isEnabled(),
+        })
+        self.nuzlocke_view.set_pc_monitor_status(
+            self.pc_storage_status_label.text() + "\n" + self.pc_storage_layout_label.text()
+            + "\n" + self.pc_storage_occupied_label.text())
+        self.shell.system_label.setText(
+            "EMULATOR LINK\n\n" + ("Connected" if snapshot.connected else "Disconnected")
+            + "\nCommands · " + self._walk_command_state
+            + "\n" + self.pc_storage_status_label.text())
+        self.compact_nuzlocke_view.rediscover_button.setEnabled(
+            self.pc_discover_current_layout_button.isEnabled())
+        self.shell.set_notification(
+            "Fainted Pokémon: review the death notification."
+            if not self.nuzlocke_view.ram_death_group.isHidden() else
+            "New Pokémon: an encounter needs review."
+            if self.nuzlocke_view.store.active_run
+            and self.nuzlocke_view.acquisition_selector.count() else "")
         if snapshot.connected:
             self._record_ev_changes(party_state)
 
     def _refresh_tracker_party(self, connected: bool, party_state) -> None:
+        self._training_party_connected = connected
         members = ()
         if (
             connected
@@ -1782,11 +1631,7 @@ class MainWindow(QMainWindow):
             and not (party_state.error and not party_state.pokemon)
         ):
             members = tuple(party_state.pokemon)
-        previous_count = self._compact_member_count
         self._compact_member_count = len(members)
-        member_count = len(members)
-        if self.compact_mode and previous_count != member_count:
-            QTimer.singleShot(0, lambda: self._resize_compact_window(max(member_count, 1)))
 
         active_slots = {pokemon.slot for pokemon in members}
         for slot, card in self.tracker_party_cards.items():
@@ -1796,7 +1641,6 @@ class MainWindow(QMainWindow):
                 card["pokemon"] = None
                 if card["sprite_species_id"] is not None:
                     self._clear_tracker_card_sprite(card)
-        self.party_grid.arrange(members)
 
         message = None
         error = None
@@ -1821,16 +1665,15 @@ class MainWindow(QMainWindow):
             info=info,
         )
         if message is not None:
-            self.party_grid.hide()
+            self._refresh_party_workspaces(connected)
             return
 
-        self.party_grid.show()
         for pokemon in members:
             card = self.tracker_party_cards[pokemon.slot]
             card["pid"] = pokemon.decoded.diagnostics.pid
             card["pokemon"] = pokemon
             self._refresh_tracker_card_sprite(card, pokemon.species_id)
-            if nickname_is_default(pokemon.nickname, pokemon.species):
+            if self.provider.nickname_is_default(pokemon.nickname, pokemon.species):
                 card["name"].hide()
             else:
                 card["name"].setText(pokemon.nickname)
@@ -1838,7 +1681,7 @@ class MainWindow(QMainWindow):
             card["species_level"].setText(
                 f"{pokemon.species} • Lv. {pokemon.level if pokemon.level is not None else '--'}"
             )
-            self._refresh_tracker_held_item(card, pokemon)
+            self._refresh_tracker_held_item(card, pokemon, self.provider)
             card["level_hp"].setText(
                 f"HP {pokemon.current_hp if pokemon.current_hp is not None else '--'} / "
                 f"{pokemon.max_hp if pokemon.max_hp is not None else '--'}"
@@ -1911,8 +1754,8 @@ class MainWindow(QMainWindow):
             total = pokemon.ev_total if pokemon.checksum_valid else None
             card["total"].setText(f"Total EVs: {total if total is not None else '--'} / 510")
             card["total_bar"].setValue(max(0, min(510, total)) if total is not None else 0)
-            self._refresh_tracker_target_display(card, pokemon)
             card["widget"].show()
+        self._refresh_party_workspaces(connected)
 
     def _set_bottom_status(
         self,
@@ -1986,6 +1829,9 @@ class MainWindow(QMainWindow):
         card["moves_list"].setText(text)
 
     def _refresh_tracker_target_display(self, card: dict[str, object], pokemon) -> None:
+        # Legacy formatter retained for compatibility; not used by Training.
+        if self.ev_target_store is None:
+            return
         pid = pokemon.decoded.diagnostics.pid
         target = self.ev_target_store.get(pid)
         card["ev_target"] = target
@@ -2053,13 +1899,15 @@ class MainWindow(QMainWindow):
                 bar.show()
 
     def _edit_ev_target(self, slot: int) -> None:
+        if self.ev_target_store is None:
+            return
         card = self.tracker_party_cards.get(slot)
         if card is None or card["pid"] is None or card["pokemon"] is None:
             return
         pokemon, pid = card["pokemon"], card["pid"]
         title = (
             pokemon.species
-            if nickname_is_default(pokemon.nickname, pokemon.species)
+            if self.provider.nickname_is_default(pokemon.nickname, pokemon.species)
             else f"{pokemon.nickname} ({pokemon.species})"
         )
         dialog = EVTargetDialog(title, self.ev_target_store.get(pid), self)
@@ -2071,8 +1919,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Could not save EV target", str(error))
             return
         self._refresh_tracker_target_display(card, pokemon)
+        self._refresh_party_workspaces()
 
     def _clear_ev_target(self, slot: int) -> None:
+        if self.ev_target_store is None:
+            return
         card = self.tracker_party_cards.get(slot)
         if card is None or card["pid"] is None or card["pokemon"] is None:
             return
@@ -2082,9 +1933,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Could not clear EV target", str(error))
             return
         self._refresh_tracker_target_display(card, card["pokemon"])
+        self._refresh_party_workspaces()
 
     @staticmethod
-    def _refresh_tracker_held_item(card: dict[str, object], pokemon) -> bool:
+    def _refresh_tracker_held_item(
+        card: dict[str, object], pokemon, provider: GameProvider | None = None
+    ) -> bool:
         item_id = pokemon.held_item_id
         if card["held_item_id"] == item_id:
             return False
@@ -2102,7 +1956,7 @@ class MainWindow(QMainWindow):
         name.setText(pokemon.held_item_name)
         name.setProperty("uiRole", "heldItem")
         refresh_style(name)
-        hint = get_gen4_item_hint(item_id)
+        hint = (provider or default_game_provider()).item_hint(item_id)
         hint_label.setText(hint or "")
         hint_label.setVisible(bool(hint))
         return True
@@ -2171,7 +2025,7 @@ class MainWindow(QMainWindow):
         for change in changes:
             name = (
                 change.species
-                if nickname_is_default(change.nickname, change.species)
+                if self.provider.nickname_is_default(change.nickname, change.species)
                 else f"{change.nickname} ({change.species})"
             )
             stat_name = labels.get(change.stat, change.stat)
@@ -2224,7 +2078,7 @@ class MainWindow(QMainWindow):
             or start_offset % 2
             or length < 2
             or length % 2
-            or length > MAX_SCAN_BYTES
+            or length > self.provider.coordinate_scan_max_bytes
         ):
             self.coordinate_discovery_status.setText(
                 "Use an even RAM offset and even length from 2 bytes through 4 MiB."
@@ -2269,7 +2123,7 @@ class MainWindow(QMainWindow):
         snapshots = dict(self.coordinate_discovery.snapshots)
 
         def analyze() -> None:
-            candidates = find_coordinate_candidates(snapshots)
+            candidates = self.provider.find_coordinate_candidates(snapshots)
             self._coordinate_analysis_signals.completed.emit(candidates)
 
         threading.Thread(
@@ -2449,7 +2303,7 @@ class MainWindow(QMainWindow):
         lines = []
         if party_payload is not None:
             payload = party_payload.payload
-            position = decode_player_position(payload)
+            position = self.provider.decode_player_position(payload)
             walk_controller = getattr(self, "friendship_walk", None)
             walk_moves = getattr(walk_controller, "successful_moves", 0)
             lines.extend(
@@ -2523,7 +2377,7 @@ class MainWindow(QMainWindow):
                         f"Enemy {1 if battler.battler_index == 1 else 2}: "
                         f"{battler.species}, Lv. {battler.level}, HP "
                         f"{battler.current_hp} / {battler.max_hp or '?'}; "
-                        f"Base EV Yield: {format_ev_yield(battler.species_id)}"
+                        f"Base EV Yield: {self.provider.format_ev_yield(battler.species_id)}"
                     )
             else:
                 lines.append("No validated active enemy battlers.")
@@ -2538,10 +2392,10 @@ class MainWindow(QMainWindow):
             diag = pokemon.decoded.diagnostics
             nickname = pokemon.decoded.nickname_diagnostics
             acquisition = pokemon.decoded.acquisition_metadata_diagnostics
-            candidate = _acquisition_candidate(pokemon)
-            source, confidence, suggested_id = classify_platinum_acquisition(
-                candidate, acquisition_run
-            )
+            candidate = self.provider.party_acquisition_candidate(pokemon)
+            source, confidence, suggested_id = (
+                self.provider.classify_acquisition(candidate, acquisition_run)
+                if self.provider.capabilities.nuzlocke else ("UNAVAILABLE", "LOW", None))
             suggested_name = None
             if suggested_id and acquisition_run:
                 suggested_name = acquisition_run.encounters.get(suggested_id)
@@ -2550,19 +2404,20 @@ class MainWindow(QMainWindow):
                 suggested_name = next(
                     (
                         location.name
-                        for location in PLATINUM_NUZLOCKE_PROFILE.locations
+                        for location in self.provider.nuzlocke_profile.locations
                         if location.location_id == suggested_id
                     ),
                     None,
                 )
-            if suggested_id is None and source not in {"TRADE", "EGG"}:
-                suggested_id = platinum_nuzlocke_location_id(
-                    pokemon.met_location_id, PLATINUM_NUZLOCKE_PROFILE
+            if (self.provider.capabilities.nuzlocke
+                    and suggested_id is None and source not in {"TRADE", "EGG"}):
+                suggested_id = self.provider.nuzlocke_location_id(
+                    pokemon.met_location_id, self.provider.nuzlocke_profile
                 )
                 suggested_name = next(
                     (
                         location.name
-                        for location in PLATINUM_NUZLOCKE_PROFILE.locations
+                        for location in self.provider.nuzlocke_profile.locations
                         if location.location_id == suggested_id
                     ),
                     None,
@@ -4054,7 +3909,7 @@ class MainWindow(QMainWindow):
                 "Resolver scope: Lua run "
                 f"{payload_data.get('session_pc_run_id', '--') if isinstance(payload_data, dict) else '--'}"
             ),
-            f"Party-reader pointer slot (not proven SaveData): {_format_optional_hex(SAVE_DATA_POINTER_ADDRESS)}",
+            f"Party-reader pointer slot (not proven SaveData): {_format_optional_hex(self.provider.pc_storage.save_data_pointer_address)}",
             f"Party-reader pointer value (not used for PC resolution): {_format_optional_hex(pointer)}",
             "SavePageInfo: not used by the session-local PC resolver",
             (
@@ -4065,13 +3920,13 @@ class MainWindow(QMainWindow):
             f"Raw bytes 0x28 before first record: {getattr(state, 'pc_boxes_header_hex', None) or '--'}",
             f"Final address RAM validation: {str(getattr(state, 'final_address_valid', False)).lower()}",
             f"First BoxPokemon record: {_format_optional_hex(records_address)}",
-            f"Record size: 0x{BOX_POKEMON_SIZE:X} ({BOX_POKEMON_SIZE} bytes)",
+            f"Record size: 0x{self.provider.pc_storage.box_pokemon_size:X} ({self.provider.pc_storage.box_pokemon_size} bytes)",
             (
-                f"Expected boxes: {PC_BOX_COUNT}; slots per box: {PC_BOX_SLOTS}; "
-                f"total slots: {PC_BOX_COUNT * PC_BOX_SLOTS}"
+                f"Expected boxes: {self.provider.pc_storage.box_count}; slots per box: {self.provider.pc_storage.slots_per_box}; "
+                f"total slots: {self.provider.pc_storage.box_count * self.provider.pc_storage.slots_per_box}"
             ),
             (
-                f"Scan length: {PC_BOX_RECORDS_SIZE:,} bytes; bytes read from RAM: "
+                f"Scan length: {self.provider.pc_storage.records_size:,} bytes; bytes read from RAM: "
                 f"{getattr(state, 'bytes_read', 0):,}"
             ),
             (
@@ -4214,8 +4069,8 @@ class MainWindow(QMainWindow):
             for mon in state.records:
                 decoded = mon.decoded
                 record_address = records_address + (
-                    (mon.box_index - 1) * PC_BOX_SLOTS + mon.slot_index - 1
-                ) * BOX_POKEMON_SIZE
+                    (mon.box_index - 1) * self.provider.pc_storage.slots_per_box + mon.slot_index - 1
+                ) * self.provider.pc_storage.box_pokemon_size
                 location = mon.met_location_name or f"Unknown #{decoded.met_location_id}"
                 lines.extend(
                     (
@@ -4341,7 +4196,7 @@ class MainWindow(QMainWindow):
                 (
                     (
                         f"Expected Box 1 Slot 1: {expected.get('nickname') or '(any nickname)'} / "
-                        f"{_gen4_species_names().get(expected.get('species_id'), 'unknown species')}"
+                        f"{self.provider.species_names().get(expected.get('species_id'), 'unknown species')}"
                     ),
                     f"Lua run: {payload_data.get('session_lua_run_id', '--')}",
                     f"Resolver status: {payload_data.get('pc_storage_resolver_status', 'unresolved')}",
@@ -4430,7 +4285,7 @@ class MainWindow(QMainWindow):
                     if not isinstance(mon, dict):
                         continue
                     species_id = _parse_optional_int(mon.get("species_id"))
-                    species_name = _gen4_species_names().get(
+                    species_name = self.provider.species_names().get(
                         species_id,
                         f"Unknown #{species_id if species_id is not None else '--'}",
                     )
@@ -4457,7 +4312,7 @@ class MainWindow(QMainWindow):
                     "Unable to classify identity matches because the active party range is unavailable."
                 )
             elif isinstance(identity_matches, list) and identity_matches:
-                species_names = _gen4_species_names()
+                species_names = self.provider.species_names()
                 for match in identity_matches:
                     if not isinstance(match, dict):
                         continue
@@ -4477,7 +4332,7 @@ class MainWindow(QMainWindow):
         excluded_party_records = payload_data.get("pc_storage_excluded_party_records")
         lines.extend(("", "Excluded party records:"))
         if isinstance(excluded_party_records, list) and excluded_party_records:
-            species_names = _gen4_species_names()
+            species_names = self.provider.species_names()
             for record in excluded_party_records:
                 if not isinstance(record, dict):
                     continue
@@ -4697,7 +4552,7 @@ class MainWindow(QMainWindow):
                 f"outside party={summary.get('non_party_match_count', 0)}"
             )
         matches = payload.get("pc_storage_search_matches")
-        names = _gen4_species_names()
+        names = self.provider.species_names()
         if isinstance(matches, list) and matches:
             for match in matches:
                 if not isinstance(match, dict):
@@ -4743,7 +4598,7 @@ class MainWindow(QMainWindow):
         record = payload.get("pc_storage_inspection_anchor_record")
         if isinstance(record, dict):
             species_id = _parse_optional_int(record.get("species_id"))
-            species_name = _gen4_species_names().get(
+            species_name = self.provider.species_names().get(
                 species_id, f"Unknown #{species_id if species_id is not None else '--'}"
             )
             lines.append(
@@ -4761,7 +4616,7 @@ class MainWindow(QMainWindow):
         nearby = payload.get("pc_storage_inspection_nearby_records")
         if isinstance(nearby, list):
             lines.extend(("  Nearby checksum-valid records (4-byte start alignment):",))
-            names = _gen4_species_names()
+            names = self.provider.species_names()
             for item in nearby:
                 if not isinstance(item, dict):
                     continue
@@ -4796,7 +4651,7 @@ class MainWindow(QMainWindow):
         copies = payload.get("pc_storage_discovery_identity_matches")
         lines.append("  Copies matching the inspected Pokemon identity:")
         if isinstance(copies, list) and copies:
-            names = _gen4_species_names()
+            names = self.provider.species_names()
             for item in copies:
                 if not isinstance(item, dict):
                     continue
@@ -5093,7 +4948,7 @@ class MainWindow(QMainWindow):
         occupied = diagnostic.get("occupied_slots")
         if isinstance(occupied, list):
             lines.append(f"  All occupied slots ({len(occupied)}):")
-            names = _gen4_species_names()
+            names = self.provider.species_names()
             for item in occupied:
                 if not isinstance(item, dict):
                     continue
@@ -5110,7 +4965,7 @@ class MainWindow(QMainWindow):
         key_checks = diagnostic.get("key_position_checks")
         if isinstance(key_checks, list):
             lines.append("  Requested position checks:")
-            names = _gen4_species_names()
+            names = self.provider.species_names()
             for item in key_checks:
                 if not isinstance(item, dict):
                     continue
@@ -5220,17 +5075,17 @@ class MainWindow(QMainWindow):
         if not isinstance(sample, dict):
             return "--"
         species_id = _parse_optional_int(sample.get("species_id"))
-        species_name = _gen4_species_names().get(species_id, f"Unknown #{species_id}")
+        species_name = self.provider.species_names().get(species_id, f"Unknown #{species_id}")
         nickname = None
         raw_hex = sample.get("raw_hex")
         address = _parse_optional_int(sample.get("address"))
         if isinstance(raw_hex, str):
             try:
                 raw = bytes.fromhex(raw_hex)
-                if len(raw) == BOX_POKEMON_SIZE:
-                    decoded = decode_box_pokemon(raw, address)
+                if len(raw) == self.provider.pc_storage.box_pokemon_size:
+                    decoded = self.provider.pc_storage.decode_box_pokemon(raw, address)
                     species_id = decoded.species_id
-                    species_name = _gen4_species_names().get(
+                    species_name = self.provider.species_names().get(
                         species_id, f"Unknown #{species_id}"
                     )
                     nickname = decoded.nickname
@@ -5286,7 +5141,7 @@ class MainWindow(QMainWindow):
         if unacked_since is not None and now - unacked_since >= 4.0:
             command_state = "ACK STALE"
         payload = getattr(party_payload, "payload", {}) if party_payload else {}
-        position = decode_player_position(payload) if payload else None
+        position = self.provider.decode_player_position(payload) if payload else None
         frame = _frame_number(payload)
         axis = getattr(walk, "axis", WalkAxis.HORIZONTAL)
         axis_name = "Horizontal (X)" if axis is WalkAxis.HORIZONTAL else "Vertical (Y)"

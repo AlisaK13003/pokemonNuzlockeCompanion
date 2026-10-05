@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QCheckBox,
     QComboBox,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -16,17 +16,16 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
-    QTextEdit,
-    QVBoxLayout,
     QWidget,
 )
 
+from pokemon_ev_tracker.config.settings import AppSettings
 from pokemon_ev_tracker.core.nuzlocke.acquisition import pending_acquisition_events
 from pokemon_ev_tracker.core.nuzlocke.death_detection import (
     DeathCandidate,
     match_death_candidate,
 )
+from pokemon_ev_tracker.core.nuzlocke.fights import build_fight_timeline
 from pokemon_ev_tracker.core.nuzlocke.models import (
     ENCOUNTER_STATUSES,
     EncounterRecord,
@@ -34,23 +33,24 @@ from pokemon_ev_tracker.core.nuzlocke.models import (
     NuzlockeGameProfile,
     PartyLevel,
     PokemonAcquisitionEvent,
-    next_level_cap,
-    over_cap_party_members,
+    RunStatus,
     resolved_level_caps,
     summarize_run,
 )
 from pokemon_ev_tracker.core.nuzlocke.storage import NuzlockeStore
-from pokemon_ev_tracker.games.platinum.nuzlocke import (
-    PLATINUM_NUZLOCKE_PROFILE,
-    PLATINUM_RETIRED_DEFAULT_LOCATIONS,
-)
+from pokemon_ev_tracker.core.nuzlocke.wipe_detection import PartyWipeCandidate
 from pokemon_ev_tracker.ui.nuzlocke_dialogs import (
     DeathDialog,
     EncounterDialog,
+    FightDetailsDialog,
     LevelCapsDialog,
     NewRunDialog,
+    RunHistoryDialog,
 )
-from pokemon_ev_tracker.ui.theme import COLORS
+from pokemon_ev_tracker.ui.nuzlocke_panels import RunPanel, run_label
+from pokemon_ev_tracker.ui.nuzlocke_workspace import build_run_workspace
+from pokemon_ev_tracker.ui.sprite_loader import get_static_sprite
+from pokemon_ev_tracker.ui.theme import COLORS, refresh_style
 
 _STATUS_LABELS = {
     "NOT_ENCOUNTERED": "Not encountered",
@@ -70,16 +70,21 @@ _STATUS_COLORS = {
 
 
 class NuzlockeView(QWidget):
+    presentation_changed = Signal()
+    rediscover_pc_requested = Signal()
+
     def __init__(
         self,
         store: NuzlockeStore | None = None,
         profiles: tuple[NuzlockeGameProfile, ...] = (),
         parent=None,
+        settings: AppSettings | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("nuzlockeView")
         self.store = store or NuzlockeStore()
         self.profiles = {profile.game_id: profile for profile in profiles}
+        self.settings = settings
         self.party_levels: tuple[PartyLevel, ...] = ()
         self._rendering = False
         self._ram_death_queue: list[tuple[str, DeathCandidate, str | None, bool]] = []
@@ -87,191 +92,197 @@ class NuzlockeView(QWidget):
         self._ram_death_notice_run_id: str | None = None
         self._shown_ram_death_key: tuple[str, str] | None = None
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 7, 8, 7)
-        root.setSpacing(7)
-        toolbar = QHBoxLayout()
-        self.run_selector = QComboBox()
-        self.run_selector.setMinimumWidth(120)
-        self.run_selector.currentIndexChanged.connect(self._switch_run)
-        toolbar.addWidget(QLabel("Run"))
-        toolbar.addWidget(self.run_selector, 1)
-        self.create_button = QPushButton("Create Run")
-        self.create_button.setProperty("buttonRole", "primary")
-        self.rename_button = QPushButton("Rename")
-        self.delete_button = QPushButton("Delete")
-        self.delete_button.setProperty("buttonRole", "danger")
-        for button in (self.create_button, self.rename_button, self.delete_button):
-            toolbar.addWidget(button)
-        self.create_button.clicked.connect(self._create_run)
-        self.rename_button.clicked.connect(self._rename_run)
-        self.delete_button.clicked.connect(self._delete_run)
-        root.addLayout(toolbar)
-
-        self.empty_label = QLabel("Create a run to start tracking encounters and level caps.")
-        self.empty_label.setObjectName("nuzlockeEmpty")
-        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self.empty_label)
-
-        self.run_content = QWidget()
-        content = QVBoxLayout(self.run_content)
-        self._run_content_layout = content
-        content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(7)
-        self.cap_group = QGroupBox("Next Level Cap")
-        self.cap_group.setObjectName("nextLevelCap")
-        cap_layout = QVBoxLayout(self.cap_group)
-        cap_heading = QHBoxLayout()
-        self.next_cap_label = QLabel("No remaining fights")
-        self.next_cap_label.setProperty("nuzlockeRole", "capTitle")
-        self.next_cap_label.setWordWrap(True)
-        cap_heading.addWidget(self.next_cap_label, 1)
-        self.cap_progress_label = QLabel("0 / 0 major fights completed")
-        self.cap_progress_label.setProperty("uiRole", "muted")
-        cap_heading.addWidget(self.cap_progress_label)
-        cap_layout.addLayout(cap_heading)
-        cap_actions = QHBoxLayout()
-        cap_actions.addStretch(1)
-        self.edit_caps_button = QPushButton("Edit Level Caps")
-        cap_actions.addWidget(self.edit_caps_button)
-        self.complete_cap_button = QPushButton("Mark Fight Completed")
-        cap_actions.addWidget(self.complete_cap_button)
-        cap_layout.addLayout(cap_actions)
-        self.healing_item_hint_label = QLabel()
-        self.healing_item_hint_label.setProperty("nuzlockeRole", "muted")
-        self.healing_item_hint_label.setToolTip(
-            "The opposing trainer's configured healing-item inventory. The battle AI may not "
-            "use every item. Held items and out-of-battle healing are not included."
-        )
-        cap_layout.addWidget(self.healing_item_hint_label)
-        self.party_warning_label = QLabel()
-        self.party_warning_label.setWordWrap(True)
-        self.party_warning_label.setProperty("nuzlockeRole", "warning")
-        cap_layout.addWidget(self.party_warning_label)
-        content.addWidget(self.cap_group)
-        self.edit_caps_button.clicked.connect(self._edit_caps)
-        self.complete_cap_button.clicked.connect(self._complete_next_cap)
-
-        self.ram_death_group = QGroupBox("Fainted Pokémon")
-        self.ram_death_group.setObjectName("ramDeathPanel")
-        ram_death_layout = QVBoxLayout(self.ram_death_group)
-        self.ram_death_detail_label = QLabel()
-        self.ram_death_detail_label.setWordWrap(True)
-        ram_death_layout.addWidget(self.ram_death_detail_label)
-        ram_death_actions = QHBoxLayout()
-        self.ram_death_location_selector = QComboBox()
-        self.ram_death_location_selector.setMinimumWidth(100)
-        self.ram_death_location_selector.currentIndexChanged.connect(
-            self._update_ram_death_action_state
-        )
-        ram_death_actions.addWidget(self.ram_death_location_selector, 1)
-        self.confirm_ram_death_button = QPushButton("Mark Dead")
-        self.confirm_ram_death_button.setProperty("buttonRole", "danger")
-        self.ignore_ram_death_button = QPushButton("Ignore")
-        self.dismiss_ram_death_notice_button = QPushButton("Dismiss")
-        ram_death_actions.addWidget(self.confirm_ram_death_button)
-        ram_death_actions.addWidget(self.ignore_ram_death_button)
-        ram_death_actions.addWidget(self.dismiss_ram_death_notice_button)
-        ram_death_layout.addLayout(ram_death_actions)
-        self.confirm_ram_death_button.clicked.connect(self._confirm_ram_death)
-        self.ignore_ram_death_button.clicked.connect(self._ignore_ram_death)
-        self.dismiss_ram_death_notice_button.clicked.connect(self._dismiss_ram_death_notice)
-        self.ram_death_group.hide()
-        content.addWidget(self.ram_death_group)
-
-        self.acquisition_group = QGroupBox("New Pokémon")
-        self.acquisition_group.setObjectName("acquisitionPanel")
-        acquisition_layout = QVBoxLayout(self.acquisition_group)
-        self.detection_sources_label = QLabel("Automatic encounter detection: Paused")
-        self.detection_sources_label.setProperty("uiRole", "muted")
-        acquisition_layout.addWidget(self.detection_sources_label)
-        self.acquisition_status_label = QLabel("Last acquisition candidate: --")
-        self.acquisition_status_label.setWordWrap(True)
-        self.acquisition_status_label.setProperty("uiRole", "muted")
-        acquisition_layout.addWidget(self.acquisition_status_label)
-        self.auto_record_acquisitions = QCheckBox("Automatically record unambiguous encounters")
-        self.auto_record_acquisitions.setToolTip(
-            "Only unused, clearly mapped wild locations are recorded automatically."
-        )
-        self.auto_record_acquisitions.toggled.connect(self._set_auto_record_acquisitions)
-        acquisition_layout.addWidget(self.auto_record_acquisitions)
-        self.auto_confirm_deaths = QCheckBox("Automatically confirm linked deaths")
-        self.auto_confirm_deaths.setToolTip(
-            "When enabled, fainted party members linked to this run are recorded as dead automatically."
-        )
-        self.auto_confirm_deaths.toggled.connect(self._set_auto_confirm_deaths)
-        acquisition_layout.addWidget(self.auto_confirm_deaths)
-        self.acquisition_detail_label = QLabel("No new Pokémon detected.")
-        self.acquisition_detail_label.setWordWrap(True)
-        suggestion_detail = QHBoxLayout()
-        suggestion_detail.addWidget(self.acquisition_detail_label, 1)
-        acquisition_layout.addLayout(suggestion_detail)
-        selection_row = QHBoxLayout()
-        self.acquisition_selector = QComboBox()
-        self.acquisition_selector.setMinimumWidth(120)
-        self.acquisition_selector.currentIndexChanged.connect(self._select_acquisition)
-        selection_row.addWidget(self.acquisition_selector, 2)
-        self.acquisition_location_selector = QComboBox()
-        self.acquisition_location_selector.setMinimumWidth(110)
-        self.acquisition_location_selector.currentIndexChanged.connect(
-            self._render_selected_acquisition
-        )
-        selection_row.addWidget(self.acquisition_location_selector, 1)
-        acquisition_layout.addLayout(selection_row)
-        suggestion_actions = QHBoxLayout()
-        suggestion_actions.addStretch(1)
-        self.accept_acquisition_button = QPushButton("Add")
-        self.replace_acquisition_button = QPushButton("Replace Existing")
-        self.extra_acquisition_button = QPushButton("Add as Extra")
-        self.ignore_acquisition_button = QPushButton("Ignore")
-        for button in (
-            self.accept_acquisition_button,
-            self.replace_acquisition_button,
-            self.extra_acquisition_button,
-            self.ignore_acquisition_button,
-        ):
-            suggestion_actions.addWidget(button)
-        acquisition_layout.addLayout(suggestion_actions)
-        content.addWidget(self.acquisition_group)
-        self.accept_acquisition_button.clicked.connect(self._accept_selected_acquisition)
-        self.replace_acquisition_button.clicked.connect(self._replace_selected_acquisition)
-        self.extra_acquisition_button.clicked.connect(self._add_selected_acquisition_extra)
-        self.ignore_acquisition_button.clicked.connect(self._ignore_selected_acquisition)
-
-        self.summary_label = QLabel()
-        self.summary_label.setProperty("nuzlockeRole", "summary")
-        self.summary_label.setWordWrap(True)
-        content.addWidget(self.summary_label)
-
-        run_details = QGroupBox("Run Notes")
-        details_layout = QHBoxLayout(run_details)
-        self.run_notes_input = QTextEdit()
-        self.run_notes_input.setMaximumHeight(62)
-        self.run_notes_input.setPlaceholderText("Optional notes for this run")
-        details_layout.addWidget(self.run_notes_input, 1)
-        details_actions = QVBoxLayout()
-        self.run_completed_input = QCheckBox("Run completed")
-        self.save_run_details_button = QPushButton("Save Details")
-        details_actions.addWidget(self.run_completed_input)
-        details_actions.addWidget(self.save_run_details_button)
-        details_actions.addStretch(1)
-        details_layout.addLayout(details_actions)
-        content.addWidget(run_details)
-        self.save_run_details_button.clicked.connect(self._save_run_details)
-        self.run_completed_input.toggled.connect(self._save_run_details)
-
-        self.sections = QTabWidget()
-        self.sections.setObjectName("nuzlockeSections")
-        content.addWidget(self.sections, 1)
-        self._build_encounters_tab()
-        self._build_caps_tab()
-        self._build_deaths_tab()
-        root.addWidget(self.run_content, 1)
+        build_run_workspace(self)
+        if settings is not None:
+            self.wipe_action_input.blockSignals(True)
+            self.no_run_prompt_input.blockSignals(True)
+            self.wipe_action_input.setCurrentIndex(
+                self.wipe_action_input.findData(settings.nuzlocke_wipe_action))
+            self.no_run_prompt_input.setChecked(settings.prompt_for_nuzlocke_run)
+            self.wipe_action_input.blockSignals(False)
+            self.no_run_prompt_input.blockSignals(False)
         self._refresh_all()
+
+    def _save_lifecycle_preferences(self, *_args) -> None:
+        if self.settings is None:
+            return
+        self.settings.nuzlocke_wipe_action = self.wipe_action_input.currentData()
+        self.settings.prompt_for_nuzlocke_run = self.no_run_prompt_input.isChecked()
+        self.settings.save_default()
 
     def set_party_levels(self, members: tuple[PartyLevel, ...]) -> None:
         self.party_levels = members
         self._refresh_cap_panel()
+        self.presentation_changed.emit()
+
+    def fight_timeline(self):
+        run = self.store.active_run
+        return build_fight_timeline(run, self.profiles.get(run.game) if run else None,
+                                    self.party_levels)
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def resizeEvent(self, event) -> None:
+        narrow = event.size().width() < 650
+        for row in self._responsive_rows:
+            row.setDirection(
+                QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
+            )
+        self.metric_strip.setVisible(not narrow)
+        self.summary_label.setVisible(narrow)
+        super().resizeEvent(event)
+
+    def show_section(self, name: str) -> None:
+        for index in range(self.sections.count()):
+            if self.sections.tabText(index).casefold() == name.casefold():
+                self.sections.setCurrentIndex(index)
+                return
+
+    def _update_section_visibility(self, *_args) -> None:
+        has_run = self.store.active_run is not None
+        library = self.sections.tabText(self.sections.currentIndex()) == "Run Library"
+        self.run_header.setVisible(has_run and not library)
+        self.empty_panel.setVisible(not has_run and not library)
+        self.sections.setVisible(has_run or library)
+
+    def set_pc_monitor_status(self, text: str) -> None:
+        """Presentation adapter for the existing runtime's PC monitor summary."""
+        self.pc_monitor_label.setText(text or "PC monitor status unavailable.")
+        self.presentation_changed.emit()
+
+    def _open_preview_encounter(self, index) -> None:
+        item = self.encounter_preview.item(index.row(), 0)
+        if item is None:
+            return
+        location_id = item.data(Qt.ItemDataRole.UserRole)
+        self.encounter_filter.setCurrentIndex(0)
+        self.show_section("Encounters")
+        for row in range(self.encounters_table.rowCount()):
+            if self.encounters_table.item(row, 0).data(Qt.ItemDataRole.UserRole) == location_id:
+                self.encounters_table.selectRow(row)
+                self.encounters_table.scrollToItem(self.encounters_table.item(row, 0))
+                break
+
+    def _activate_library_run(self, index) -> None:
+        item = self.run_library_table.item(index.row(), 0)
+        if item is not None:
+            run = self.store.get_run(item.data(Qt.ItemDataRole.UserRole))
+            if run and run.status == RunStatus.ACTIVE.value:
+                self.run_selector.setCurrentIndex(self.run_selector.findData(run.run_id))
+            elif run:
+                self._show_historical_run(run)
+
+    def _open_selected_run(self) -> None:
+        run = self._selected_library_run()
+        if not run:
+            return
+        if run.status == RunStatus.ACTIVE.value:
+            self._set_selected_active()
+            self.show_section("Dashboard")
+        else:
+            self._show_historical_run(run)
+
+    def _selected_library_run(self):
+        row = self.run_library_table.currentRow()
+        item = self.run_library_table.item(row, 0) if row >= 0 else None
+        return self.store.get_run(item.data(Qt.ItemDataRole.UserRole)) if item else self.store.active_run
+
+    def _update_library_actions(self) -> None:
+        run = self._selected_library_run()
+        for button in (self.open_button, self.rename_button, self.delete_button):
+            button.setEnabled(run is not None)
+        self.set_active_button.setEnabled(
+            run is not None and run.status == RunStatus.ACTIVE.value
+            and run.run_id != self.store.active_run_id)
+        self.abandon_button.setEnabled(run is not None and run.status == RunStatus.ACTIVE.value)
+
+    def _render_run_library(self) -> None:
+        requested = self.run_status_filter.currentData()
+        shown = [run for run in self.store.runs if not requested or run.status == requested]
+        self.run_library_table.setRowCount(len(shown))
+        for row, run in enumerate(shown):
+            profile = self.profiles.get(run.game)
+            caps = resolved_level_caps(run, profile) if profile else ()
+            summary = summarize_run(run, caps)
+            values = (
+                run.name, run.status, profile.display_name if profile else run.game,
+                run.started_at[:10], run.ended_at[:10] if run.ended_at else "—",
+                str(summary.caught), str(summary.deaths),
+                f"{summary.completed_fights} / {summary.total_fights}",
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                if column == 1:
+                    item.setForeground(QColor({
+                        RunStatus.ACTIVE.value: COLORS["accent"],
+                        RunStatus.WON.value: COLORS["success"],
+                        RunStatus.WIPED.value: COLORS["danger"],
+                        RunStatus.ABANDONED.value: COLORS["text_muted"],
+                    }.get(run.status, COLORS["text"])))
+                self.run_library_table.setItem(row, column, item)
+            self.run_library_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, run.run_id)
+        self._update_library_actions()
+
+    def _show_historical_run(self, run) -> None:
+        RunHistoryDialog(run, self.profiles.get(run.game), self).exec()
+
+    def _render_dashboard(self) -> None:
+        """Read-only projection of existing run records; no detection runs here."""
+        # TODO: per-fight notes require a validated model/storage contract; only run notes exist.
+        run, profile = self.store.active_run, self._active_profile()
+        if not run:
+            self.encounter_preview.setRowCount(0)
+            self.pending_warning_label.clear()
+            self.recent_events_label.setText("No detection events recorded.")
+            self.presentation_changed.emit()
+            return
+        caps = resolved_level_caps(run, profile) if profile else ()
+        summary = summarize_run(run, caps)
+        self.run_title_label.setText(run.name)
+        state = run.status
+        game = profile.display_name if profile else f"Unsupported profile: {run.game}"
+        self.run_metadata_label.setText(f"{state.upper()} · {game}")
+        for key, label in self.run_metrics.items():
+            label.setText(str(getattr(summary, key)))
+        records = [record for record in run.encounters.values() if not _encounter_is_unused(record)]
+        self.encounter_preview.setRowCount(min(5, len(records)))
+        self.preview_empty_label.setVisible(not records)
+        self.encounter_preview.setVisible(bool(records))
+        for row, record in enumerate(records[:5]):
+            values = (
+                record.location, _STATUS_LABELS.get(record.status, record.status),
+                f"{record.nickname} · {record.species}" if record.nickname else record.species,
+                str(record.level) if record.level is not None else "—",
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.encounter_preview.setItem(row, column, item)
+            self.encounter_preview.item(row, 0).setData(Qt.ItemDataRole.UserRole, record.location_id)
+        pending = len(pending_acquisition_events(run))
+        self.pending_warning_label.setText(
+            f"{pending} acquisition{'s' if pending != 1 else ''} awaiting a decision."
+            if pending else "No encounters awaiting a decision."
+        )
+        self.review_pending_button.setVisible(bool(pending))
+        events = []
+        for event in run.acquisition_events:
+            status = "reviewed" if event.stable_id in run.resolved_acquisition_ids else "pending"
+            events.append((event.detected_at, (
+                f"{event.nickname or event.species_name} · {event.source_location} · {status}"
+            )))
+        for death in run.deaths:
+            if death.detection_source == "RAM_AUTO":
+                events.append((death.timestamp, f"{death.nickname or death.species} · faint recorded"))
+        events.sort(key=lambda item: item[0], reverse=True)
+        self.recent_events_label.setText(
+            "\n".join(f"{when}  {message}" for when, message in events[:4])
+            or "No detection events recorded."
+        )
+        self.presentation_changed.emit()
 
     def move_ram_death_notification(self, parent: QWidget) -> None:
         self._run_content_layout.removeWidget(self.ram_death_group)
@@ -307,10 +318,10 @@ class NuzlockeView(QWidget):
         self._render_ram_death_candidate()
 
     def _build_encounters_tab(self) -> None:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(5, 5, 5, 5)
+        page = RunPanel("Encounter ledger")
+        layout = page.content
         controls = QHBoxLayout()
+        self._responsive_rows.append(controls)
         self.encounter_filter = QComboBox()
         self.encounter_filter.addItem("All statuses", "")
         for status in ENCOUNTER_STATUSES:
@@ -345,29 +356,46 @@ class NuzlockeView(QWidget):
         layout.addWidget(self.encounters_table, 1)
         self.edit_encounter_button.clicked.connect(self._edit_selected_encounter)
         self.reset_encounter_button.clicked.connect(self._reset_selected_encounter)
+        layout.addWidget(self.auto_record_acquisitions)
+        layout.addWidget(self.acquisition_group)
         self.sections.addTab(page, "Encounters")
 
     def _build_caps_tab(self) -> None:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        self.caps_table = QTableWidget(0, 4)
-        self.caps_table.setHorizontalHeaderLabels(("Fight", "Category", "Level Cap", "Completed"))
+        page = RunPanel("Major fights")
+        layout = page.content
+        heading = QHBoxLayout()
+        self._responsive_rows.append(heading)
+        heading.addWidget(run_label(
+            "Ordered by the game profile. Double-click a fight to edit its cap or notes."
+        ), 1)
+        edit = QPushButton("Edit Level Caps")
+        edit.clicked.connect(self._edit_caps)
+        heading.addWidget(edit)
+        layout.addLayout(heading)
+        self.caps_table = QTableWidget(0, 9)
+        self.caps_table.setHorizontalHeaderLabels((
+            "#", "Fight", "Category", "Default", "Effective", "Healing items",
+            "Status", "Note", "Completed",
+        ))
         self.caps_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self.caps_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.caps_table.verticalHeader().hide()
         self.caps_table.setAlternatingRowColors(True)
         self._configure_table(self.caps_table)
-        self.caps_table.setColumnWidth(0, 260)
-        self.caps_table.setColumnWidth(1, 160)
-        self.caps_table.setColumnWidth(2, 90)
+        self.caps_table.setColumnWidth(0, 45)
+        self.caps_table.setColumnWidth(1, 220)
+        self.caps_table.setColumnWidth(2, 130)
         self.caps_table.horizontalHeader().setStretchLastSection(True)
+        self.caps_table.cellDoubleClicked.connect(self._open_fight_row)
         layout.addWidget(self.caps_table, 1)
-        self.sections.addTab(page, "Level Caps")
+        self.sections.addTab(page, "Fights")
 
     def _build_deaths_tab(self) -> None:
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        page = RunPanel("Death log")
+        layout = page.content
+        layout.addWidget(run_label("Chronological · newest first · encounter history preserved"))
         controls = QHBoxLayout()
+        self._responsive_rows.append(controls)
         controls.addStretch(1)
         self.add_death_button = QPushButton("Record Death")
         self.remove_death_button = QPushButton("Remove Death")
@@ -399,7 +427,20 @@ class NuzlockeView(QWidget):
         layout.addWidget(self.deaths_table, 1)
         self.add_death_button.clicked.connect(self._add_death)
         self.remove_death_button.clicked.connect(self._remove_death)
-        self.sections.addTab(page, "Death Log")
+        self.auto_confirm_deaths = QCheckBox("Auto-confirm linked deaths")
+        self.auto_confirm_deaths.setMinimumWidth(0)
+        self.auto_confirm_deaths.setToolTip(
+            "When enabled, fainted party members linked to this run are recorded as dead automatically."
+        )
+        self.auto_confirm_deaths.toggled.connect(self._set_auto_confirm_deaths)
+        layout.addWidget(self.auto_confirm_deaths)
+        layout.addWidget(run_label(
+            "Faint candidates use fresh HP transitions and stable Pokémon identity. "
+            "Unlinked candidates require review."
+        ))
+        # TODO: party-wipe detection is a separate, unvalidated backend feature.
+        layout.addWidget(run_label("Party wipe detection is not available."))
+        self.sections.addTab(page, "Deaths")
 
     @staticmethod
     def _configure_table(table: QTableWidget) -> None:
@@ -415,38 +456,35 @@ class NuzlockeView(QWidget):
 
     def _refresh_all(self) -> None:
         self._render_run_selector()
+        self._render_run_library()
         run = self.store.active_run
-        self.run_content.setVisible(run is not None)
-        self.empty_label.setVisible(run is None)
+        self._update_section_visibility()
         if run is None:
             self.ram_death_group.hide()
+            self.encounters_table.setRowCount(0)
+            self.caps_table.setRowCount(0)
+            self.deaths_table.setRowCount(0)
+            self._render_dashboard()
+            self._refresh_cap_panel()
+            self.presentation_changed.emit()
             return
         profile = self._active_profile()
         if profile:
-            retired_locations = (
-                PLATINUM_RETIRED_DEFAULT_LOCATIONS
-                if run.game == PLATINUM_NUZLOCKE_PROFILE.game_id
-                else ()
-            )
             self.store.ensure_locations(
                 run.run_id,
                 profile.locations,
-                obsolete_locations=retired_locations,
+                obsolete_locations=profile.retired_default_locations,
             )
         self.run_notes_input.blockSignals(True)
         self.run_notes_input.setPlainText(run.notes)
         self.run_notes_input.blockSignals(False)
-        self.run_completed_input.blockSignals(True)
-        self.run_completed_input.setChecked(run.completed)
-        self.run_completed_input.blockSignals(False)
         self.auto_record_acquisitions.blockSignals(True)
         self.auto_record_acquisitions.setChecked(run.auto_record_unambiguous_encounters)
         self.auto_record_acquisitions.blockSignals(False)
         self.auto_confirm_deaths.blockSignals(True)
         self.auto_confirm_deaths.setChecked(run.automatically_confirm_deaths)
         self.auto_confirm_deaths.blockSignals(False)
-        self.rename_button.setEnabled(True)
-        self.delete_button.setEnabled(True)
+        self._update_library_actions()
         supported = profile is not None
         self.cap_group.setVisible(supported)
         self.edit_caps_button.setEnabled(supported)
@@ -457,6 +495,7 @@ class NuzlockeView(QWidget):
             self.caps_table.setRowCount(0)
             self.deaths_table.setRowCount(0)
             self._render_ram_death_candidate()
+            self._render_dashboard()
             return
         self._render_encounters()
         self._render_caps()
@@ -464,19 +503,21 @@ class NuzlockeView(QWidget):
         self._render_ram_death_candidate()
         self._refresh_cap_panel()
         self.refresh_acquisition_suggestions()
+        self._render_dashboard()
+        self.presentation_changed.emit()
 
     def _render_run_selector(self) -> None:
         self.run_selector.blockSignals(True)
         self.run_selector.clear()
         active_id = self.store.active_run_id
         for run in self.store.runs:
+            if run.status != RunStatus.ACTIVE.value:
+                continue
             self.run_selector.addItem(run.name, run.run_id)
         index = self.run_selector.findData(active_id)
         self.run_selector.setCurrentIndex(index)
         self.run_selector.blockSignals(False)
-        has_run = self.store.active_run is not None
-        self.rename_button.setEnabled(has_run)
-        self.delete_button.setEnabled(has_run)
+        self._update_library_actions()
 
     def refresh_acquisition_suggestions(self) -> None:
         run = self.store.active_run
@@ -488,6 +529,7 @@ class NuzlockeView(QWidget):
             self._refresh_all()
             return
         self._render_acquisition_suggestions()
+        self._render_dashboard()
 
     def report_acquisition_trace(self, trace: dict[str, object]) -> None:
         self.acquisition_status_label.setText(
@@ -503,6 +545,7 @@ class NuzlockeView(QWidget):
     def _render_acquisition_suggestions(self) -> None:
         run = self.store.active_run
         events = pending_acquisition_events(run)
+        self.acquisition_group.setVisible(bool(events))
         self.acquisition_selector.blockSignals(True)
         self.acquisition_selector.clear()
         for event in events:
@@ -548,6 +591,8 @@ class NuzlockeView(QWidget):
         event = self._selected_acquisition()
         run = self.store.active_run
         if not event or not run:
+            self.acquisition_sprite.clear()
+            self.acquisition_sprite.hide()
             self.acquisition_detail_label.setText("No new Pokémon detected.")
             self.acquisition_location_selector.setEnabled(False)
             for button in (
@@ -559,6 +604,9 @@ class NuzlockeView(QWidget):
                 button.setEnabled(False)
             return
 
+        pixmap = get_static_sprite(event.species_id, 64)
+        self.acquisition_sprite.setPixmap(pixmap)
+        self.acquisition_sprite.setVisible(not pixmap.isNull())
         self.report_acquisition_trace({
             "source": event.source_location,
             "pokemon": event.nickname or event.species_name,
@@ -875,7 +923,7 @@ class NuzlockeView(QWidget):
         if run_id and run_id != self.store.active_run_id:
             try:
                 self.store.switch_run(run_id)
-            except OSError as error:
+            except (OSError, ValueError) as error:
                 self._show_error("Could not switch run", error)
             self._refresh_all()
 
@@ -883,6 +931,9 @@ class NuzlockeView(QWidget):
         if not self.profiles:
             return
         dialog = NewRunDialog(tuple(self.profiles.values()), self)
+        preferred = self._active_profile() or next(iter(self.profiles.values()))
+        dialog.game_input.setCurrentIndex(dialog.game_input.findData(preferred.game_id))
+        dialog.name_input.setText(self.store.suggest_next_run_name(preferred))
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         name, profile = dialog.values()
@@ -894,7 +945,7 @@ class NuzlockeView(QWidget):
         self._refresh_all()
 
     def _rename_run(self) -> None:
-        run = self.store.active_run
+        run = self._selected_library_run()
         if not run:
             return
         name, accepted = QInputDialog.getText(self, "Rename Run", "Run name", text=run.name)
@@ -908,13 +959,14 @@ class NuzlockeView(QWidget):
         self._refresh_all()
 
     def _delete_run(self) -> None:
-        run = self.store.active_run
+        run = self._selected_library_run()
         if not run:
             return
         answer = QMessageBox.question(
             self,
             "Delete Run",
-            f"Delete '{run.name}' and all of its encounter, cap, and death data?",
+            f"Permanently delete '{run.name}' and all encounters, deaths, fights, "
+            "notes, overrides, acquisition history, and lifecycle data?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1076,34 +1128,54 @@ class NuzlockeView(QWidget):
         self._refresh_all()
 
     def _render_caps(self) -> None:
-        run, profile = self.store.active_run, self._active_profile()
-        if not run or not profile:
+        timeline = self.fight_timeline()
+        if timeline is None:
             self.caps_table.setRowCount(0)
             return
-        caps = resolved_level_caps(run, profile)
-        self.caps_table.setRowCount(len(caps))
-        for row, cap in enumerate(caps):
-            self.caps_table.setItem(row, 0, QTableWidgetItem(cap.name))
-            self.caps_table.setItem(row, 1, QTableWidgetItem(cap.category))
-            self.caps_table.setItem(row, 2, QTableWidgetItem(f"Lv. {cap.level_cap}"))
+        self.caps_table.setRowCount(len(timeline.fights))
+        for row, fight in enumerate(timeline.fights):
+            values = (
+                f"{fight.order:02d}", fight.name, fight.category,
+                str(fight.default_level_cap),
+                f"Custom: {fight.effective_level_cap}" if fight.overridden
+                else str(fight.effective_level_cap),
+                fight.healing_text, fight.status.title(),
+                "Notes" if fight.notes else "",
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(fight.notes if column == 7 and fight.notes else value)
+                if column == 6:
+                    item.setForeground(QColor(
+                        COLORS["success"] if fight.completed else
+                        COLORS["accent"] if fight.status == "UP NEXT" else
+                        COLORS["text_muted"]
+                    ))
+                self.caps_table.setItem(row, column, item)
             completed = QCheckBox()
-            completed.setChecked(cap.cap_id in run.completed_cap_ids)
+            completed.setChecked(fight.completed)
             completed.setToolTip("Fight completed")
             completed.toggled.connect(
-                lambda value, cap_id=cap.cap_id: self._set_cap_completed(cap_id, value)
+                lambda value, cap_id=fight.fight_id: self._set_cap_completed(cap_id, value)
             )
             holder = QWidget()
             holder_layout = QHBoxLayout(holder)
             holder_layout.setContentsMargins(0, 0, 0, 0)
             holder_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             holder_layout.addWidget(completed)
-            self.caps_table.setCellWidget(row, 3, holder)
+            self.caps_table.setCellWidget(row, 8, holder)
+
+    def _open_fight_row(self, row: int, _column: int) -> None:
+        timeline = self.fight_timeline()
+        if timeline and 0 <= row < len(timeline.fights):
+            self._edit_fight(timeline.fights[row].fight_id)
 
     def _edit_caps(self) -> None:
         run, profile = self.store.active_run, self._active_profile()
         if not run or not profile:
             return
-        dialog = LevelCapsDialog(resolved_level_caps(run, profile), run.level_cap_overrides, self)
+        dialog = LevelCapsDialog(tuple(sorted(profile.level_caps, key=lambda cap: cap.order)),
+                                 run.level_cap_overrides, self)
         if dialog.exec() != dialog.DialogCode.Accepted:
             return
         try:
@@ -1124,58 +1196,158 @@ class NuzlockeView(QWidget):
             self._show_error("Could not update fight status", error)
         self._refresh_all()
 
-    def _complete_next_cap(self) -> None:
-        run, profile = self.store.active_run, self._active_profile()
-        if not run or not profile:
+    def _set_selected_active(self) -> None:
+        run = self._selected_library_run()
+        if not run or run.status != RunStatus.ACTIVE.value:
             return
-        cap = next_level_cap(run, resolved_level_caps(run, profile))
-        if cap:
-            self._set_cap_completed(cap.cap_id, True)
+        try:
+            self.store.switch_run(run.run_id)
+        except (OSError, ValueError) as error:
+            self._show_error("Could not activate run", error)
+            return
+        self._refresh_all()
+
+    def _abandon_run(self) -> None:
+        run = self._selected_library_run()
+        if not run or run.status != RunStatus.ACTIVE.value:
+            return
+        answer = QMessageBox.question(
+            self, "Abandon Run",
+            f'Abandon "{run.name}"? The run history will be preserved.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.store.set_run_status(run.run_id, RunStatus.ABANDONED)
+        except OSError as error:
+            self._show_error("Could not abandon run", error)
+            return
+        self._refresh_all()
+
+    def _mark_run_won(self) -> None:
+        run = self.store.active_run
+        timeline = self.fight_timeline()
+        if not run or not timeline or timeline.next_fight is not None:
+            return
+        try:
+            self.store.set_run_status(run.run_id, RunStatus.WON)
+        except OSError as error:
+            self._show_error("Could not mark run won", error)
+            return
+        self._refresh_all()
+
+    def end_run_wiped(self, candidate: PartyWipeCandidate) -> bool:
+        run = self.store.active_run
+        if run is None or run.run_id != candidate.run_id:
+            return False
+        try:
+            for member in candidate.members:
+                death = DeathCandidate(
+                    stable_id=member.stable_id, species=member.species,
+                    nickname=member.nickname, level=member.level,
+                    met_location_id=member.met_location_id,
+                    met_location_name=member.met_location_name,
+                    met_level=member.met_level, detected_at=candidate.detected_at,
+                )
+                match = match_death_candidate(death, run)
+                self.store.record_ram_death(
+                    run.run_id, death, match.location_id if not match.ambiguous else None)
+            self.store.set_run_status(run.run_id, RunStatus.WIPED)
+        except (OSError, KeyError, ValueError) as error:
+            self._show_error("Could not end wiped run", error)
+            return False
+        self._ram_death_queue = [entry for entry in self._ram_death_queue if entry[0] != run.run_id]
+        self._refresh_all()
+        return True
+
+    def _edit_next_fight(self) -> None:
+        timeline = self.fight_timeline()
+        if timeline and timeline.next_fight:
+            self._edit_fight(timeline.next_fight.fight_id)
+
+    def _edit_fight(self, fight_id: str) -> None:
+        timeline = self.fight_timeline()
+        run = self.store.active_run
+        fight = next((item for item in timeline.fights if item.fight_id == fight_id), None) if timeline else None
+        if run is None or fight is None:
+            return
+        dialog = FightDetailsDialog(fight, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        override, notes = dialog.values()
+        try:
+            self.store.set_level_cap_override(run.run_id, fight_id, override)
+            self.store.set_fight_notes(run.run_id, fight_id, notes)
+        except (OSError, ValueError) as error:
+            self._show_error("Could not save fight details", error)
+            return
+        self._refresh_all()
+
+    def _complete_next_cap(self) -> None:
+        timeline = self.fight_timeline()
+        if timeline and timeline.next_fight:
+            self._set_cap_completed(timeline.next_fight.fight_id, True)
 
     def _refresh_cap_panel(self) -> None:
+        timeline = self.fight_timeline()
         run, profile = self.store.active_run, self._active_profile()
-        if not run or not profile:
-            return
-        caps = resolved_level_caps(run, profile)
-        cap = next_level_cap(run, caps)
-        summary = summarize_run(run, caps)
-        self.cap_progress_label.setText(
-            f"{summary.completed_fights} / {summary.total_fights} major fights completed"
-        )
-        if cap:
-            self.next_cap_label.setText(f"{cap.name}  ·  Lv. {cap.level_cap}")
-            if cap.healing_item_count is None:
-                self.healing_item_hint_label.setText("Opponent healing items: unknown")
-            else:
-                breakdown = ", ".join(
-                    f"{name} x{count}" for name, count in (cap.healing_items or ())
-                )
-                hint = (
-                    f"Opponent healing items: {cap.healing_item_count}"
-                    if cap.healing_item_count
-                    else "Opponent healing items: none"
-                )
-                self.healing_item_hint_label.setText(
-                    f"{hint} ({breakdown})" if breakdown else hint
-                )
-            self.complete_cap_button.setEnabled(True)
-        else:
-            self.next_cap_label.setText("All listed fights completed")
-            self.healing_item_hint_label.clear()
+        if timeline is None:
+            self.next_cap_label.setText("No active Nuzlocke run")
+            self.cap_category_label.setText("No cap currently applied")
+            for label in (self.cap_effective_label, self.cap_default_label,
+                          self.cap_progress_label, self.healing_item_hint_label,
+                          self.party_readiness_label, self.party_detail_label,
+                          self.fight_note_label, self.party_warning_label):
+                label.clear()
             self.complete_cap_button.setEnabled(False)
-        over = over_cap_party_members(self.party_levels, cap.level_cap if cap else None)
-        if over:
-            labels = [
-                f"{member.nickname or member.species} ({member.species}) Lv. {member.level}"
-                if member.nickname and member.nickname.casefold() != member.species.casefold()
-                else f"{member.species} Lv. {member.level}"
-                for member in over
-            ]
-            self.party_warning_label.setText(
-                f"Over current cap ({cap.level_cap}): " + ", ".join(labels)
-            )
+            self.edit_caps_button.setEnabled(False)
+            self.mark_won_button.hide()
+            return
+        cap = timeline.next_fight
+        summary = summarize_run(run, resolved_level_caps(run, profile))
+        self.cap_progress_label.setText(
+            f"{timeline.completed_count} / {timeline.total_fights} major fights completed"
+        )
+        self.complete_cap_button.setEnabled(cap is not None)
+        self.edit_caps_button.setEnabled(cap is not None)
+        if cap is None:
+            self.next_cap_label.setText("All major fights complete")
+            self.cap_category_label.clear()
+            self.cap_effective_label.setText(f"{timeline.total_fights} / {timeline.total_fights}")
+            for label in (self.cap_default_label, self.healing_item_hint_label,
+                          self.party_readiness_label, self.party_detail_label,
+                          self.fight_note_label, self.party_warning_label):
+                label.clear()
+            self.mark_won_button.show()
         else:
-            self.party_warning_label.setText("No party members are above the current cap.")
+            self.mark_won_button.hide()
+            self.next_cap_label.setText(cap.name)
+            self.cap_category_label.setText(cap.category)
+            self.cap_effective_label.setText(f"LEVEL CAP  {cap.effective_level_cap}")
+            self.cap_default_label.setText(
+                f"Custom · Default {cap.default_level_cap}" if cap.overridden
+                else "Game default")
+            self.cap_progress_label.setText(
+                f"Fight {cap.order} / {cap.total_fights} · "
+                f"{timeline.completed_count} completed")
+            self.healing_item_hint_label.setText(f"Opponent healing: {cap.healing_text}")
+            if cap.party:
+                self.party_readiness_label.setText(
+                    f"Party readiness: {cap.ready_count} ready · {cap.over_count} over cap")
+                over = [f"{member.name} Lv. {member.level}  +{member.over_by} over cap"
+                        for member in cap.party if member.over_by]
+                self.party_detail_label.setText("\n".join(over) if over else "Party within cap")
+            else:
+                self.party_readiness_label.setText("Party levels unavailable")
+                self.party_detail_label.clear()
+            for label in (self.party_readiness_label, self.party_detail_label):
+                label.setProperty("nuzlockeRole", "warning" if cap.over_count else "summary")
+                refresh_style(label)
+            self.party_warning_label.setText(self.party_detail_label.text())
+            self.fight_note_label.setText(
+                f"Note: {cap.notes.strip().splitlines()[0][:100]}" if cap.notes.strip() else "")
         self.summary_label.setText(
             f"Caught {summary.caught}   ·   Failed {summary.failed}   ·   "
             f"Deaths {summary.deaths}   ·   Skipped {summary.skipped}   ·   "
@@ -1190,10 +1362,13 @@ class NuzlockeView(QWidget):
             self.store.update_run_details(
                 run.run_id,
                 notes=self.run_notes_input.toPlainText(),
-                completed=self.run_completed_input.isChecked(),
+                completed=run.completed,
             )
         except OSError as error:
             self._show_error("Could not save run details", error)
+            return
+        self._render_run_library()
+        self._render_dashboard()
 
     def _add_death(self) -> None:
         run, profile = self.store.active_run, self._active_profile()

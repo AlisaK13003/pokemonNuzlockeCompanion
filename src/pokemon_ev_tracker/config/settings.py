@@ -28,7 +28,11 @@ def _normalize_window_geometry(value) -> tuple[int, int, int, int] | None:
 class AppSettings:
     compact_mode: bool = False
     tracker_view: str = "training"
+    workspace_view: str | None = None
     friendship_walk_axis: str = "horizontal"
+    friendship_goals: dict[str, int] | None = None
+    nuzlocke_wipe_action: str = "ASK ME"
+    prompt_for_nuzlocke_run: bool = True
     pc_box1_species_id: int = 415
     pc_box1_nickname: str = "mitsu"
     window_geometry: tuple[int, int, int, int] | None = None
@@ -36,6 +40,13 @@ class AppSettings:
 
     def __post_init__(self) -> None:
         self.compact_mode = bool(self.compact_mode)
+        if self.nuzlocke_wipe_action not in {"ASK ME", "END RUN AS WIPED", "IGNORE"}:
+            self.nuzlocke_wipe_action = "ASK ME"
+        self.prompt_for_nuzlocke_run = bool(self.prompt_for_nuzlocke_run)
+        if not isinstance(self.workspace_view, str) or self.workspace_view not in {
+            "training", "stats", "nuzlocke", "diagnostics",
+        }:
+            self.workspace_view = None
         if not isinstance(self.tracker_view, str) or self.tracker_view not in {
             "training",
             "stats",
@@ -46,6 +57,13 @@ class AppSettings:
             "vertical",
         }:
             self.friendship_walk_axis = "horizontal"
+        if not isinstance(self.friendship_goals, dict):
+            self.friendship_goals = {}
+        else:
+            self.friendship_goals = {
+                key: value for key, value in self.friendship_goals.items()
+                if isinstance(key, str) and key and type(value) is int and 0 <= value <= 255
+            }
         if type(self.pc_box1_species_id) is not int or not 1 <= self.pc_box1_species_id <= 493:
             self.pc_box1_species_id = 415
         if not isinstance(self.pc_box1_nickname, str) or (
@@ -94,7 +112,11 @@ class AppSettings:
         return cls(
             compact_mode=data.get("compact_mode", False),
             tracker_view=data.get("tracker_view", "training"),
+            workspace_view=data.get("workspace_view"),
             friendship_walk_axis=data.get("friendship_walk_axis", "horizontal"),
+            friendship_goals=data.get("friendship_goals"),
+            nuzlocke_wipe_action=data.get("nuzlocke_wipe_action", "ASK ME"),
+            prompt_for_nuzlocke_run=data.get("prompt_for_nuzlocke_run", True),
             pc_box1_species_id=data.get("pc_box1_species_id", 415),
             pc_box1_nickname=data.get("pc_box1_nickname", "mitsu"),
             window_geometry=data.get("window_geometry"),

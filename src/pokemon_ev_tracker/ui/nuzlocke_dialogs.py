@@ -9,16 +9,43 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from pokemon_ev_tracker.core.nuzlocke.models import DeathRecord, LevelCap, NuzlockeGameProfile
+from pokemon_ev_tracker.core.nuzlocke.fights import FightDisplayData, build_fight_timeline
+from pokemon_ev_tracker.core.nuzlocke.models import (
+    DeathRecord,
+    LevelCap,
+    NuzlockeGameProfile,
+    NuzlockeRun,
+)
+
+
+def _heading(layout, title: str, detail: str) -> None:
+    heading = QLabel(title)
+    heading.setProperty("uiRole", "pageTitle")
+    heading.setWordWrap(True)
+    description = QLabel(detail)
+    description.setProperty("uiRole", "muted")
+    description.setWordWrap(True)
+    if isinstance(layout, QFormLayout):
+        layout.addRow(heading)
+        layout.addRow(description)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    else:
+        layout.addWidget(heading)
+        layout.addWidget(description)
+    layout.setContentsMargins(18, 18, 18, 18)
+    layout.setSpacing(12)
 
 
 class NewRunDialog(QDialog):
@@ -27,6 +54,8 @@ class NewRunDialog(QDialog):
         self.setWindowTitle("Create Nuzlocke Run")
         self.profiles = profiles
         layout = QFormLayout(self)
+        _heading(layout, "Create Nuzlocke run", "Choose a game profile for encounter locations and ordered level caps.")
+        self.resize(480, 260)
         self.name_input = QLineEdit("New Run")
         self.game_input = QComboBox()
         for profile in profiles:
@@ -38,6 +67,8 @@ class NewRunDialog(QDialog):
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create Run")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setProperty("buttonRole", "primary")
         layout.addRow(buttons)
 
     def values(self) -> tuple[str, NuzlockeGameProfile]:
@@ -45,11 +76,73 @@ class NewRunDialog(QDialog):
         return self.name_input.text(), profile
 
 
+class RunHistoryDialog(QDialog):
+    """Read-only history for a finished run."""
+
+    def __init__(self, run: NuzlockeRun, profile: NuzlockeGameProfile | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Run History: {run.name}")
+        self.resize(760, 570)
+        layout = QVBoxLayout(self)
+        _heading(layout, run.name, (
+            f"{run.status} · {profile.display_name if profile else run.game} · "
+            f"Started {run.started_at[:10]} · Ended {(run.ended_at or '—')[:10]}"))
+        if run.outcome_note:
+            layout.addWidget(QLabel(f"Outcome note: {run.outcome_note}"))
+        if run.notes:
+            notes = QTextEdit()
+            notes.setReadOnly(True)
+            notes.setPlainText(run.notes)
+            notes.setMaximumHeight(80)
+            layout.addWidget(notes)
+        tabs = QTabWidget()
+        encounters = tuple(run.encounters.values())
+        tabs.addTab(self._table(("Location", "Status", "Pokémon", "Nickname", "Level", "Notes"), (
+            (item.location, item.status.replace("_", " ").title(), item.species,
+             item.nickname, str(item.level) if item.level is not None else "—", item.notes)
+            for item in encounters
+        )), "Encounters")
+        tabs.addTab(self._table(("Pokémon", "Nickname", "Level", "Location / fight", "Notes"), (
+            (item.species, item.nickname,
+             str(item.level_at_death) if item.level_at_death is not None else "—",
+             item.location_or_fight, item.notes)
+            for item in run.deaths
+        )), "Deaths")
+        timeline = build_fight_timeline(run, profile)
+        tabs.addTab(self._table(("#", "Fight", "Category", "Cap", "Status", "Notes"), (
+            (str(fight.order), fight.name, fight.category,
+             str(fight.effective_level_cap), fight.status, fight.notes)
+            for fight in timeline.fights
+        ) if timeline else ()), "Fights")
+        layout.addWidget(tabs, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _table(headers: tuple[str, ...], rows) -> QTableWidget:
+        rows = tuple(rows)
+        table = QTableWidget(len(rows), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().hide()
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                cell.setToolTip(value)
+                table.setItem(row, column, cell)
+        table.resizeColumnsToContents()
+        return table
+
+
 class EncounterDialog(QDialog):
     def __init__(self, location: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"Encounter: {location}")
         form = QFormLayout(self)
+        _heading(form, "Edit encounter", location)
+        self.resize(480, 360)
         self.species_input = QLineEdit()
         self.nickname_input = QLineEdit()
         self.level_input = QSpinBox()
@@ -86,6 +179,7 @@ class LevelCapsDialog(QDialog):
         self.setWindowTitle("Edit Level Caps")
         self._cap_rows: list[tuple[LevelCap, QCheckBox, QSpinBox]] = []
         layout = QVBoxLayout(self)
+        _heading(layout, "Edit level caps", "Enable Custom to override a fight's cap for this run. Clear Custom to restore its profile value.")
         self.table = QTableWidget(len(caps), 3)
         self.table.setHorizontalHeaderLabels(("Fight", "Category", "Cap"))
         self.table.verticalHeader().hide()
@@ -127,11 +221,49 @@ class LevelCapsDialog(QDialog):
         }
 
 
+class FightDetailsDialog(QDialog):
+    """Edit one run's cap and free-form note without changing profile definitions."""
+
+    def __init__(self, fight: FightDisplayData, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Fight details: {fight.name}")
+        form = QFormLayout(self)
+        _heading(form, fight.name, f"{fight.category} · Fight {fight.order} / {fight.total_fights}")
+        form.addRow("Default cap", QLabel(f"Lv. {fight.default_level_cap}"))
+        self.custom_input = QCheckBox("Use custom cap")
+        self.custom_input.setChecked(fight.overridden)
+        self.cap_input = QSpinBox()
+        self.cap_input.setRange(1, 100)
+        self.cap_input.setValue(fight.effective_level_cap)
+        self.cap_input.setEnabled(fight.overridden)
+        self.custom_input.toggled.connect(self.cap_input.setEnabled)
+        form.addRow(self.custom_input)
+        form.addRow("Effective cap", self.cap_input)
+        self.notes_input = QTextEdit()
+        self.notes_input.setPlainText(fight.notes)
+        self.notes_input.setPlaceholderText("Optional notes for this fight")
+        self.notes_input.setMinimumHeight(100)
+        form.addRow("Notes", self.notes_input)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.resize(430, 340)
+
+    def values(self) -> tuple[int | None, str]:
+        return (self.cap_input.value() if self.custom_input.isChecked() else None,
+                self.notes_input.toPlainText())
+
+
 class DeathDialog(QDialog):
     def __init__(self, locations: tuple[str, ...], parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Record a Death")
         form = QFormLayout(self)
+        _heading(form, "Record a death", "Add a manual record without changing an encounter slot.")
+        self.resize(480, 360)
         self.species_input = QLineEdit()
         self.nickname_input = QLineEdit()
         self.level_input = QSpinBox()

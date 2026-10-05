@@ -15,6 +15,13 @@ class EncounterStatus(str, Enum):
     DUPES = "DUPES"
 
 
+class RunStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    WON = "WON"
+    WIPED = "WIPED"
+    ABANDONED = "ABANDONED"
+
+
 ENCOUNTER_STATUSES = tuple(status.value for status in EncounterStatus)
 
 
@@ -56,6 +63,7 @@ class NuzlockeGameProfile:
     display_name: str
     locations: tuple[EncounterLocation, ...]
     level_caps: tuple[LevelCap, ...]
+    retired_default_locations: tuple[EncounterLocation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -125,17 +133,25 @@ class NuzlockeRun:
     name: str
     game: str
     created_at: str
+    status: str = RunStatus.ACTIVE.value
+    ended_at: str | None = None
+    outcome_note: str = ""
     notes: str = ""
     completed: bool = False
     encounters: dict[str, EncounterRecord] = field(default_factory=dict)
     level_cap_overrides: dict[str, int] = field(default_factory=dict)
     completed_cap_ids: list[str] = field(default_factory=list)
+    fight_notes: dict[str, str] = field(default_factory=dict)
     deaths: list[DeathRecord] = field(default_factory=list)
     observed_pokemon_ids: list[str] = field(default_factory=list)
     acquisition_events: list[PokemonAcquisitionEvent] = field(default_factory=list)
     resolved_acquisition_ids: list[str] = field(default_factory=list)
     auto_record_unambiguous_encounters: bool = False
     automatically_confirm_deaths: bool = False
+
+    @property
+    def started_at(self) -> str:
+        return self.created_at
 
 
 @dataclass(frozen=True)

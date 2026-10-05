@@ -14,7 +14,7 @@ class BackendStatusWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        self.compact_label = QLabel("BizHawk RAM • DISCONNECTED")
+        self.compact_label = QLabel("● DISCONNECTED")
         self.compact_label.setProperty("connectionState", "disconnected")
         layout.addWidget(self.compact_label)
         self.details = {}
@@ -44,7 +44,8 @@ class BackendStatusWidget(QWidget):
     def set_connection(self, backend: str, connected: bool, heartbeat, age: float | None) -> None:
         status = "CONNECTED" if connected else "DISCONNECTED"
         state = "connected" if connected else "disconnected"
-        self.compact_label.setText(f"{backend} • {status}")
+        self.compact_label.setText("● LIVE" if connected else "● DISCONNECTED")
+        self.compact_label.setToolTip(f"{backend} • {status}")
         self.compact_label.setProperty("connectionState", state)
         refresh_style(self.compact_label)
         self.details["backend"].setText(backend)

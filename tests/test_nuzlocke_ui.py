@@ -17,6 +17,7 @@ from pokemon_ev_tracker.core.nuzlocke.models import (
 )
 from pokemon_ev_tracker.core.nuzlocke.storage import NuzlockeStore
 from pokemon_ev_tracker.games.platinum.nuzlocke import PLATINUM_NUZLOCKE_PROFILE
+from pokemon_ev_tracker.ui.nuzlocke_dialogs import FightDetailsDialog
 from pokemon_ev_tracker.ui.nuzlocke_view import NuzlockeView
 
 
@@ -38,14 +39,15 @@ def test_view_shows_platinum_encounters_and_next_cap(nuzlocke_view) -> None:
     assert view.encounters_table.item(0, 0).text() == "Starter"
     assert view.encounters_table.item(0, 1).text() == ""
     assert view.encounters_table.cellWidget(0, 1).currentText() == "Not encountered"
-    assert view.next_cap_label.text() == "Barry - Route 201  ·  Lv. 5"
-    assert view.healing_item_hint_label.text() == "Opponent healing items: none"
+    assert view.next_cap_label.text() == "Barry - Route 201"
+    assert view.cap_effective_label.text() == "LEVEL CAP  5"
+    assert view.healing_item_hint_label.text() == "Opponent healing: None"
 
     view._complete_next_cap()
     assert run.completed_cap_ids == [PLATINUM_NUZLOCKE_PROFILE.level_caps[0].cap_id]
-    assert view.next_cap_label.text() == "Barry - Route 203  ·  Lv. 9"
-    assert view.healing_item_hint_label.text() == "Opponent healing items: none"
-    assert "1 / 24" in view.cap_progress_label.text()
+    assert view.next_cap_label.text() == "Barry - Route 203"
+    assert view.healing_item_hint_label.text() == "Opponent healing: None"
+    assert "Fight 2 / 24" in view.cap_progress_label.text()
 
 
 def test_encounter_status_filter_and_death_count_render(nuzlocke_view) -> None:
@@ -69,10 +71,8 @@ def test_party_levels_only_drive_read_only_over_cap_warning(nuzlocke_view) -> No
     members = (PartyLevel("sparky", "Shinx", 15), PartyLevel("", "Starly", 14))
     view.set_party_levels(members)
 
-    assert (
-        "Over current cap (5): sparky (Shinx) Lv. 15, Starly Lv. 14"
-        == view.party_warning_label.text()
-    )
+    assert "sparky Lv. 15  +10 over cap" in view.party_warning_label.text()
+    assert "Starly Lv. 14  +9 over cap" in view.party_warning_label.text()
     assert view.party_levels == members
 
 
@@ -82,8 +82,78 @@ def test_level_cap_override_changes_warning_threshold(nuzlocke_view) -> None:
     store.set_level_cap_override(run.run_id, PLATINUM_NUZLOCKE_PROFILE.level_caps[0].cap_id, 16)
     view.set_party_levels((PartyLevel("", "Shinx", 15),))
 
-    assert view.next_cap_label.text() == "Barry - Route 201  ·  Lv. 16"
-    assert view.party_warning_label.text() == "No party members are above the current cap."
+    assert view.next_cap_label.text() == "Barry - Route 201"
+    assert view.cap_effective_label.text() == "LEVEL CAP  16"
+    assert view.party_warning_label.text() == "Party within cap"
+
+
+def test_rich_fight_card_timeline_notes_and_reopen(nuzlocke_view) -> None:
+    _app, view, store = nuzlocke_view
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    caps = PLATINUM_NUZLOCKE_PROFILE.level_caps
+    for cap in caps[:4]:
+        store.set_cap_completed(run.run_id, cap.cap_id, True)
+    store.set_level_cap_override(run.run_id, caps[4].cap_id, 24)
+    store.set_fight_notes(run.run_id, caps[4].cap_id, "Bring max 4 Pokémon")
+    view.set_party_levels((PartyLevel("Rei", "Piplup", 24),
+                           PartyLevel("Shizuku", "Shinx", 25)))
+    view._refresh_all()
+    assert view.next_cap_label.text() == "Gardenia"
+    assert view.cap_category_label.text() == "Gym Leader"
+    assert view.cap_effective_label.text() == "LEVEL CAP  24"
+    assert view.cap_default_label.text() == "Custom · Default 22"
+    assert "Fight 5 / 24" in view.cap_progress_label.text()
+    assert view.healing_item_hint_label.text() == "Opponent healing: 2× Super Potion"
+    assert view.party_readiness_label.text() == "Party readiness: 1 ready · 1 over cap"
+    assert view.party_detail_label.text() == "Shizuku Lv. 25  +1 over cap"
+    assert view.fight_note_label.text() == "Note: Bring max 4 Pokémon"
+    assert view.caps_table.item(4, 4).text() == "Custom: 24"
+    assert view.caps_table.item(4, 6).text() == "Up Next"
+    assert view.caps_table.item(4, 7).text() == "Notes"
+    view._complete_next_cap()
+    assert view.caps_table.item(4, 6).text() == "Completed"
+    assert view.next_cap_label.text() != "Gardenia"
+    view._set_cap_completed(caps[4].cap_id, False)
+    assert view.next_cap_label.text() == "Gardenia"
+
+
+def test_fight_card_no_run_and_all_complete(nuzlocke_view) -> None:
+    _app, view, store = nuzlocke_view
+    assert view.next_cap_label.text() == "No active Nuzlocke run"
+    run = store.create_run("Done", PLATINUM_NUZLOCKE_PROFILE)
+    for cap in PLATINUM_NUZLOCKE_PROFILE.level_caps:
+        store.set_cap_completed(run.run_id, cap.cap_id, True)
+    view._refresh_all()
+    assert view.next_cap_label.text() == "All major fights complete"
+    assert view.cap_effective_label.text() == "24 / 24"
+    assert not view.complete_cap_button.isEnabled()
+
+
+def test_edit_fight_saves_note_and_can_reset_override(nuzlocke_view, monkeypatch) -> None:
+    _app, view, store = nuzlocke_view
+    run = store.create_run("Notes", PLATINUM_NUZLOCKE_PROFILE)
+    cap_id = PLATINUM_NUZLOCKE_PROFILE.level_caps[0].cap_id
+
+    def save_custom(dialog):
+        dialog.custom_input.setChecked(True)
+        dialog.cap_input.setValue(7)
+        dialog.notes_input.setPlainText("Randomized rival team")
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(FightDetailsDialog, "exec", save_custom)
+    view._edit_next_fight()
+    assert run.level_cap_overrides[cap_id] == 7
+    assert run.fight_notes[cap_id] == "Randomized rival team"
+    assert view.fight_note_label.text() == "Note: Randomized rival team"
+
+    def reset_default(dialog):
+        dialog.custom_input.setChecked(False)
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(FightDetailsDialog, "exec", reset_default)
+    view._edit_next_fight()
+    assert cap_id not in run.level_cap_overrides
+    assert view.cap_default_label.text() == "Game default"
 
 
 def _acquisition_event(stable_id="pid:shinx", *, source="WILD", suggested="Route 202"):

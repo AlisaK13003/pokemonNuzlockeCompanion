@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import time
-from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -14,15 +13,16 @@ from PySide6.QtWidgets import QApplication
 
 from pokemon_ev_tracker.config.settings import AppSettings
 from pokemon_ev_tracker.core.ev_targets import EVTargetStore
+from pokemon_ev_tracker.core.nuzlocke.models import PartyLevel
 from pokemon_ev_tracker.core.nuzlocke.storage import NuzlockeStore
 from pokemon_ev_tracker.data_sources.bizhawk import (
     BizHawkRamDataSource,
     CoordinateCaptureRequest,
 )
 from pokemon_ev_tracker.games.platinum.coordinate_discovery import CoordinateCandidate
+from pokemon_ev_tracker.games.platinum.nuzlocke import PLATINUM_NUZLOCKE_PROFILE
 from pokemon_ev_tracker.transport.bizhawk_server import FriendshipWalkCommandReceipt
 from pokemon_ev_tracker.ui.main_window import MainWindow
-from pokemon_ev_tracker.ui.party_card import PartyCardSize
 from pokemon_ev_tracker.ui.party_layout import party_card_positions
 
 
@@ -39,38 +39,52 @@ def make_window(monkeypatch, tmp_path):
             target_store=EVTargetStore(tmp_path / "ev_targets.json"),
             nuzlocke_store=NuzlockeStore(tmp_path / "nuzlocke_runs.json"),
         )
+        window.refresh_timer.stop()
         return window
 
     yield create
     assert app is not None
 
 
-def test_compact_mode_sets_always_on_top_hides_debug_and_restores_normal(make_window) -> None:
+def test_training_fight_summary_tracks_same_run_and_live_party(make_window) -> None:
+    window = make_window()
+    assert window.training_view.next_fight_name.text() == "No active run"
+    assert window.compact_training_view.next_fight_detail.text() == "Level cap unavailable"
+    run = window.nuzlocke_view.store.create_run("Current", PLATINUM_NUZLOCKE_PROFILE)
+    cap = PLATINUM_NUZLOCKE_PROFILE.level_caps[0]
+    window.nuzlocke_view._refresh_all()
+    window.nuzlocke_view.set_party_levels((PartyLevel("Sparky", "Shinx", 6),))
+    assert window.training_view.next_fight_name.text() == window.nuzlocke_view.next_cap_label.text()
+    assert "1 over cap" in window.training_view.next_fight_detail.text()
+    assert window.compact_training_view.next_fight_detail.text() == "Cap 5 · 1 over"
+    window.nuzlocke_view.store.set_level_cap_override(run.run_id, cap.cap_id, 6)
+    window.nuzlocke_view._refresh_all()
+    assert "0 over cap" in window.training_view.next_fight_detail.text()
+    assert window.compact_training_view.next_fight_detail.text() == "Cap 6 · 0 over"
+    window.close()
+
+
+def test_compact_mode_sets_always_on_top_and_restores_diagnostics(make_window) -> None:
     window = make_window()
     window.resize(920, 700)
-    window.main_tabs.setCurrentIndex(1)
+    window.set_route("diagnostics")
     normal_geometry = window._current_window_geometry()
-
     window.set_compact_mode(True)
-
     assert window.compact_mode
     assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
-    assert window.main_tabs.currentIndex() == 0
-    assert window.main_tabs.tabBar().isHidden()
-    assert not window.main_tabs.isTabVisible(1)
-    assert not window.main_tabs.isTabVisible(2)
+    assert window.shell.workspace.currentWidget() is window.compact_training_view
+    assert window.shell.rail.isHidden()
+    assert not window.shell.compact_switcher.isHidden()
+    assert set(window.shell.compact_buttons) == {"training", "stats", "nuzlocke"}
     assert window.settings.normal_window_geometry == normal_geometry
     assert window.tracker_title.isHidden()
     assert not window.compact_status_label.isHidden()
-
     window.set_compact_mode(False)
-
     assert not window.compact_mode
     assert not window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
-    assert not window.main_tabs.tabBar().isHidden()
-    assert window.main_tabs.isTabVisible(1)
-    assert window.main_tabs.isTabVisible(2)
-    assert window.main_tabs.currentIndex() == 1
+    assert not window.shell.rail.isHidden()
+    assert window.shell.compact_switcher.isHidden()
+    assert window.shell.workspace.currentWidget() is window.diagnostics_view
     assert window._current_window_geometry() == normal_geometry
     window.close()
 
@@ -92,6 +106,44 @@ def test_compact_toggle_keeps_visible_window_visible(make_window) -> None:
     window.close()
 
 
+@pytest.mark.parametrize("route", ("training", "stats", "nuzlocke", "diagnostics"))
+def test_workspace_navigation_is_restored_on_restart(make_window, tmp_path, route) -> None:
+    window = make_window()
+    window.shell.nav_buttons[route].click()
+    assert window.route == route
+    path = tmp_path / "workspace-settings.json"
+    window.settings.save(path)
+    window.close()
+
+    restored = make_window(AppSettings.load(path))
+
+    assert restored.route == route
+    assert restored.shell.workspace.currentWidget() is restored.shell.pages[route]
+    restored.close()
+
+
+def test_compact_nuzlocke_route_survives_restart_and_expansion(make_window, tmp_path) -> None:
+    window = make_window()
+    window.set_route("diagnostics")
+    window.set_compact_mode(True)
+    window.shell.compact_buttons["nuzlocke"].click()
+    assert window.route == "nuzlocke"
+    assert window._compact_return_route is None
+    path = tmp_path / "compact-nuzlocke.json"
+    window.settings.save(path)
+    window.close()
+
+    restored = make_window(AppSettings.load(path))
+
+    assert restored.compact_mode
+    assert restored.route == "nuzlocke"
+    assert restored.shell.workspace.currentWidget() is restored.compact_nuzlocke_view
+    restored.set_compact_mode(False)
+    assert restored.shell.workspace.currentWidget() is restored.shell.pages["nuzlocke"]
+    assert restored.shell.pages["nuzlocke"].isAncestorOf(restored.nuzlocke_view)
+    restored.close()
+
+
 def test_saved_compact_mode_and_geometry_are_applied_on_startup(make_window) -> None:
     settings = AppSettings(
         compact_mode=True,
@@ -103,7 +155,7 @@ def test_saved_compact_mode_and_geometry_are_applied_on_startup(make_window) -> 
 
     assert window.compact_mode
     assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
-    assert window.main_tabs.tabBar().isHidden()
+    assert window.shell.rail.isHidden()
     assert window.width() == 600
     assert window.height() == 430
     window.close()
@@ -125,7 +177,7 @@ def test_compact_history_shows_four_recent_entries_and_normal_restores_full_text
 
     window.set_compact_mode(True)
     assert window.ev_change_list.count() == 4
-    assert window.ev_change_list.minimumHeight() == 112
+    assert window.ev_change_list.minimumHeight() == 45
     assert window.ev_change_list.item(0).text() == "+3 Attack — sheepy (Mareep)"
     assert window.ev_change_list.item(3).text() == "+6 Attack — sheepy (Mareep)"
 
@@ -135,19 +187,20 @@ def test_compact_history_shows_four_recent_entries_and_normal_restores_full_text
     window.close()
 
 
-def test_tracker_places_opponent_above_party_and_gives_log_room_for_multiple_rows(
-    make_window,
-) -> None:
+def test_training_composes_runtime_panels_and_reparents_them_for_compact(make_window) -> None:
     window = make_window()
-
-    assert window.tracker_layout.indexOf(
-        window.current_opponent_panel
-    ) < window.tracker_layout.indexOf(window.party_grid)
-    assert window.ev_change_list.minimumHeight() >= 150
-    assert window.ev_change_list.maximumHeight() >= 200
-    assert window.tracker_layout.indexOf(
-        window.friendship_walk_group
-    ) < window.tracker_layout.indexOf(window.party_grid)
+    panels = {"opponent": window.current_opponent_panel,
+              "history": window.ev_change_log, "friendship": window.friendship_walk_group}
+    for key, panel in panels.items():
+        assert window.training_view.runtime_hosts[key].isAncestorOf(panel)
+    assert window.ev_change_list.minimumHeight() >= 100
+    assert window.ev_change_list.maximumHeight() >= 150
+    window.set_compact_mode(True)
+    for key, panel in panels.items():
+        assert window.compact_training_view.runtime_hosts[key].isAncestorOf(panel)
+    window.set_compact_mode(False)
+    for key, panel in panels.items():
+        assert window.training_view.runtime_hosts[key].isAncestorOf(panel)
     window.close()
 
 
@@ -573,7 +626,8 @@ def test_coordinate_discovery_is_collapsed_under_advanced_debug(make_window) -> 
 def test_ram_debug_updates_preserve_manual_scroll_position(make_window) -> None:
     app = QApplication.instance()
     window = make_window()
-    window.main_tabs.setCurrentIndex(1)
+    window.set_route("diagnostics")
+    window.diagnostics_view.set_section("advanced")
     window.show()
     lines = [f"RAM diagnostic row {index:03d}: value 0000" for index in range(120)]
     window._set_ram_party_debug_text("\n".join(lines))
@@ -671,67 +725,40 @@ def test_party_layout_keeps_three_columns_for_one_through_six_members() -> None:
         assert all(row < 2 for row, _column in positions)
 
 
-def test_compact_window_sizes_cover_one_through_six_members(make_window) -> None:
+def test_compact_geometry_is_independent_of_party_size(make_window) -> None:
     window = make_window()
     window.set_compact_mode(True)
-    sizes = {}
+    sizes = set()
     for count in range(1, 7):
         window._resize_compact_window(count)
-        sizes[count] = (window.width(), window.height())
-
-    assert all(width >= 320 for width, _height in sizes.values())
-    assert sizes[1][0] < sizes[2][0] < sizes[3][0]
-    assert sizes[3][0] == sizes[4][0] == sizes[5][0] == sizes[6][0]
-    assert sizes[1][1] == sizes[3][1]
-    assert sizes[4][1] == sizes[6][1]
-    assert sizes[4][1] > sizes[3][1]
+        sizes.add((window.width(), window.height()))
+    assert len(sizes) == 1
+    width, height = sizes.pop()
+    assert 320 <= width <= 800
+    assert 300 <= height <= 760
     window.close()
 
 
-def test_compact_party_cards_use_small_size_and_wrap_to_fit(make_window) -> None:
+def test_compact_selector_keeps_all_six_slots_and_selected_workspace_in_bounds(make_window) -> None:
     app = QApplication.instance()
     window = make_window()
-    window.show()
-    app.processEvents()
-    window.party_grid.arrange(tuple(SimpleNamespace(slot=slot) for slot in range(1, 7)))
-    window.party_grid.show()
     window.set_compact_mode(True)
-    app.processEvents()
-
-    for width, expected_columns in ((1000, 3), (800, 3), (600, 2), (400, 1)):
-        window.resize(width, 700)
-        app.processEvents()
-        assert window.party_grid.card_size is PartyCardSize.SMALL
-        assert window.party_grid.columns == expected_columns, (
-            f"window={window.width()} grid={window.party_grid.width()} "
-            f"viewport={window.tracker_scroll_area.viewport().width()}"
-        )
-        cards = [
-            card["widget"]
-            for card in window.tracker_party_cards.values()
-            if not card["widget"].isHidden()
-        ]
-        rows = [
-            cards[index : index + expected_columns]
-            for index in range(0, len(cards), expected_columns)
-        ]
-        assert len({row[0].geometry().x() for row in rows}) == 1
-        assert max(card.geometry().right() for card in cards) <= window.party_grid.width()
-        assert (
-            window.party_grid.x() + rows[0][-1].geometry().right() + 1
-            <= window.tracker_scroll_area.viewport().width()
-        )
-        for row in rows:
-            for previous, following in pairwise(row):
-                assert (
-                    following.geometry().x()
-                    - previous.geometry().x()
-                    - previous.geometry().width()
-                ) == window.party_grid.HORIZONTAL_SPACING
-        for card in cards:
-            assert card.width() == PartyCardSize.SMALL.preferred_width
-
-    window._geometry_save_timer.stop()
+    window.show()
+    for route in ("training", "stats"):
+        window.shell.compact_buttons[route].click()
+        view = window.shell.workspace.currentWidget()
+        assert view in (window.compact_training_view, window.compact_party_stats_view)
+        for width in (800, 600, 400):
+            window.resize(width, 700)
+            for _ in range(3):
+                app.processEvents()
+            slots = list(view.selector.slots.values())
+            assert len(slots) == 6
+            assert all(slot.isVisible() for slot in slots)
+            assert all(slot._condensed for slot in slots)
+            assert max(slot.geometry().right() for slot in slots) < view.selector.width()
+            assert view.scroll.widget().width() <= view.scroll.viewport().width()
+            assert view.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     window.close()
 
 
@@ -749,28 +776,31 @@ def test_muted_tracker_labels_keep_readable_dark_theme_contrast(make_window) -> 
     window.close()
 
 
-def test_party_stats_compact_mode_keeps_stats_visible_and_log_hidden(make_window) -> None:
+def test_party_stats_compact_mode_keeps_inspection_workspace_and_log_hidden(make_window) -> None:
     window = make_window()
     window.set_tracker_view("stats")
     window.set_compact_mode(True)
-
-    assert window.tracker_view_buttons["stats"].isChecked()
-    assert window.tracker_party_cards[1]["stats_content"].isHidden() is False
-    assert window.tracker_party_cards[1]["training_content"].isHidden()
+    assert window.shell.compact_buttons["stats"].isChecked()
+    assert window.shell.workspace.currentWidget() is window.compact_party_stats_view
     assert window.ev_change_log.isHidden()
     assert window.compact_mode
     window.close()
 
 
-def test_compact_mode_hides_nuzlocke_and_restores_its_tab(make_window) -> None:
+def test_compact_switcher_changes_all_three_workspaces_without_expanding(make_window) -> None:
     window = make_window()
-    window.main_tabs.setCurrentIndex(2)
-
+    window.set_route("nuzlocke")
     window.set_compact_mode(True)
-    assert not window.main_tabs.isTabVisible(2)
-    assert window.main_tabs.currentIndex() == 0
-
+    assert window.shell.workspace.currentWidget() is window.compact_nuzlocke_view
+    for route, view in (("training", window.compact_training_view),
+                        ("stats", window.compact_party_stats_view),
+                        ("nuzlocke", window.compact_nuzlocke_view)):
+        window.shell.compact_buttons[route].click()
+        assert window.compact_mode
+        assert window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+        assert window.shell.workspace.currentWidget() is view
+        assert window.route == route
     window.set_compact_mode(False)
-    assert window.main_tabs.isTabVisible(2)
-    assert window.main_tabs.currentIndex() == 2
+    assert window.shell.workspace.currentWidget() is window.nuzlocke_scroll_area
+    assert window.route == "nuzlocke"
     window.close()

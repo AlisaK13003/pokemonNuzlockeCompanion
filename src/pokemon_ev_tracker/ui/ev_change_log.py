@@ -3,23 +3,23 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QListWidget, QPushButton, QVBoxLayout
 
 
-class EvChangeLogWidget(QWidget):
+class EvChangeLogWidget(QFrame):
     def __init__(self, clear_callback, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("evChangeLog")
+        self.setProperty("uiRole", "panel")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 8, 4, 4)
+        layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(5)
         heading = QHBoxLayout()
-        self.heading = QLabel("EV Change Log")
+        self.heading = QLabel("RECENT EV GAINS")
         self.heading.setProperty("uiRole", "sectionHeading")
         heading.addWidget(self.heading)
         heading.addStretch(1)
-        self.clear_button = QPushButton("Clear Log")
-        self.clear_button.setProperty("buttonRole", "danger")
+        self.clear_button = QPushButton("Clear")
         self.clear_button.clicked.connect(clear_callback)
         heading.addWidget(self.clear_button)
         layout.addLayout(heading)

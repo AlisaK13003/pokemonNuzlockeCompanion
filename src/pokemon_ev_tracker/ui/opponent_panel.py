@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QMovie
 from PySide6.QtWidgets import (
     QBoxLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pokemon_ev_tracker.games.platinum.ev_yields import format_ev_yield_summary
+from pokemon_ev_tracker.games.registry import default_game_provider
 from pokemon_ev_tracker.ui.sprite_loader import (
     get_animated_sprite_size,
     get_static_sprite,
@@ -27,8 +27,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 class _OpponentCard(QWidget):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, ev_yield_summary=None) -> None:
         super().__init__(parent)
+        self._ev_yield_summary = ev_yield_summary or default_game_provider().format_ev_yield_summary
         self.setProperty("uiRole", "opponentCard")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._species_id: int | None = None
@@ -71,7 +72,7 @@ class _OpponentCard(QWidget):
 
         level = pokemon.level if pokemon.level is not None else "--"
         self.name.setText(f"{pokemon.species} • Lv. {level}")
-        self.ev_yield.setText(format_ev_yield_summary(species_id))
+        self.ev_yield.setText(self._ev_yield_summary(species_id))
 
     def clear(self) -> None:
         self._clear_sprite()
@@ -105,32 +106,50 @@ class _OpponentCard(QWidget):
         self._asset = None
 
 
-class CurrentOpponentPanel(QGroupBox):
-    def __init__(self, parent=None) -> None:
-        super().__init__("Currently Battling", parent)
+class CurrentOpponentPanel(QFrame):
+    def __init__(self, parent=None, ev_yield_summary=None) -> None:
+        super().__init__(parent)
         self.setObjectName("currentlyBattling")
+        self.setProperty("uiRole", "panel")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 5)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 9, 10, 9)
+        heading = QLabel("CURRENTLY BATTLING")
+        heading.setProperty("uiRole", "sectionHeading")
+        root.addWidget(heading)
+        layout = QHBoxLayout()
+        self.opponents_layout = layout
+        root.addLayout(layout)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
         self.empty_label = QLabel("Not currently battling")
         self.empty_label.setProperty("uiRole", "emptyState")
         layout.addWidget(self.empty_label)
-        self.cards = [_OpponentCard(self), _OpponentCard(self)]
+        self.cards = [
+            _OpponentCard(self, ev_yield_summary),
+            _OpponentCard(self, ev_yield_summary),
+        ]
         for card in self.cards:
             card.hide()
             layout.addWidget(card, 1)
         self._set_layout_direction()
-        self.setMaximumHeight(58)
+        self.setMaximumHeight(78)
 
         # Keep the first-opponent labels available for callers and diagnostics.
         self.sprite = self.cards[0].sprite
         self.name = self.cards[0].name
         self.ev_yield = self.cards[0].ev_yield
 
+    def title(self) -> str:
+        return "Currently Battling"
+
     def set_opponent(self, pokemon) -> None:
         self.set_opponents((pokemon,) if pokemon is not None else ())
+
+    def set_unavailable(self) -> None:
+        self.set_opponents(())
+        self.empty_label.setText("Live battle analysis unavailable for this game")
 
     def set_opponents(self, pokemon_list) -> None:
         opponents = tuple(pokemon_list or ())[:2]
@@ -155,7 +174,7 @@ class CurrentOpponentPanel(QGroupBox):
             "panel visible: %s; panel height: %d; content visible: %s; visible cards: %d",
             len(opponents),
             visible_cards,
-            self.layout().count(),
+            self.opponents_layout.count(),
             self.isVisible(),
             self.height(),
             content_visible,
@@ -170,14 +189,14 @@ class CurrentOpponentPanel(QGroupBox):
     def _update_panel_height(self) -> None:
         visible_cards = sum(not card.isHidden() for card in self.cards)
         if visible_cards == 0:
-            self.setMaximumHeight(58)
+            self.setMaximumHeight(78)
         elif visible_cards == 2 and self.width() < 650:
             self.setMaximumHeight(220)
         else:
-            self.setMaximumHeight(125)
+            self.setMaximumHeight(145)
 
     def _set_layout_direction(self) -> None:
-        layout = self.layout()
+        layout = self.opponents_layout
         layout.setDirection(
             QBoxLayout.Direction.TopToBottom
             if self.width() < 650

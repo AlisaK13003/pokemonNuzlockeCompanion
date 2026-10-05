@@ -99,6 +99,8 @@ def test_gen4_move_slots_decode_and_resolve_to_platinum_names() -> None:
         species_id=179,
         evs=(0, 0, 0, 0, 0, 0),
         moves=(98, 45, 0, 1),
+        move_pps=(17, 29, 0, 34),
+        move_pp_ups=(1, 2, 0, 3),
     )
 
     decoded = decode_party_pokemon(record)
@@ -106,7 +108,18 @@ def test_gen4_move_slots_decode_and_resolve_to_platinum_names() -> None:
 
     assert decoded.diagnostics.checksum_valid
     assert decoded.move_ids == (98, 45, 0, 1)
+    assert decoded.move_current_pps == (17, 29, 0, 34)
+    assert decoded.move_pp_ups == (1, 2, 0, 3)
     assert party.pokemon[0].moves == ("Quick Attack", "Growl", "Pound")
+
+    updated = decode_party_pokemon(_party_record(
+        pid=0x12345678, species_id=179, evs=(0, 0, 0, 0, 0, 0),
+        moves=(98, 85, 0, 1), move_pps=(16, 10, 0, 34),
+        move_pp_ups=(1, 0, 0, 3),
+    ))
+    assert updated.move_ids == (98, 85, 0, 1)
+    assert updated.move_current_pps == (16, 10, 0, 34)
+    assert updated.move_pp_ups == (1, 0, 0, 3)
 
 
 @pytest.mark.parametrize("friendship", (0, 164, 255))
@@ -1132,10 +1145,12 @@ def _party_record(
     special_defense_stat: int = 65,
     friendship: int = 0,
     moves: tuple[int, int, int, int] = (0, 0, 0, 0),
+    move_pps: tuple[int, int, int, int] = (0, 0, 0, 0),
+    move_pp_ups: tuple[int, int, int, int] = (0, 0, 0, 0),
 ) -> bytes:
     if nickname is not None:
         nickname_codes = _encode_gen4_nickname(nickname)
-    plain = _plain_box(
+    plain = bytearray(_plain_box(
         species_id,
         evs,
         nickname_codes,
@@ -1147,7 +1162,10 @@ def _party_record(
         has_nickname,
         friendship,
         moves,
-    )
+    ))
+    plain[0x28:0x2C] = bytes(move_pps)
+    plain[0x2C:0x30] = bytes(move_pp_ups)
+    plain = bytes(plain)
     checksum = calculate_checksum(plain)
     encrypted = encrypt_box_data(plain, pid, checksum)
     record = bytearray(PARTY_POKEMON_SIZE)

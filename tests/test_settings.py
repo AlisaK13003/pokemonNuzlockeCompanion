@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from pokemon_ev_tracker.config.settings import AppSettings
 
 
@@ -10,7 +12,9 @@ def test_settings_round_trip(tmp_path) -> None:
     original = AppSettings(
         compact_mode=True,
         tracker_view="stats",
+        workspace_view="nuzlocke",
         friendship_walk_axis="vertical",
+        friendship_goals={"pid:1234": 220},
         window_geometry=(-1200, 55, 744, 620),
         normal_window_geometry=(20, 30, 1260, 850),
     )
@@ -22,7 +26,11 @@ def test_settings_round_trip(tmp_path) -> None:
     assert set(json.loads(path.read_text(encoding="utf-8"))) == {
         "compact_mode",
         "tracker_view",
+        "workspace_view",
         "friendship_walk_axis",
+        "friendship_goals",
+        "nuzlocke_wipe_action",
+        "prompt_for_nuzlocke_run",
         "pc_box1_species_id",
         "pc_box1_nickname",
         "window_geometry",
@@ -70,7 +78,11 @@ def test_load_default_migrates_only_tracker_preferences(monkeypatch, tmp_path) -
     assert set(json.loads(destination.read_text(encoding="utf-8"))) == {
         "compact_mode",
         "tracker_view",
+        "workspace_view",
         "friendship_walk_axis",
+        "friendship_goals",
+        "nuzlocke_wipe_action",
+        "prompt_for_nuzlocke_run",
         "pc_box1_species_id",
         "pc_box1_nickname",
         "window_geometry",
@@ -91,3 +103,26 @@ def test_invalid_friendship_walk_axis_defaults_to_horizontal(tmp_path) -> None:
     path.write_text('{"friendship_walk_axis": ["vertical"]}', encoding="utf-8")
 
     assert AppSettings.load(path).friendship_walk_axis == "horizontal"
+
+
+def test_friendship_goals_filter_invalid_values_and_round_trip(tmp_path) -> None:
+    path = tmp_path / "goals.json"
+    path.write_text(json.dumps({"friendship_goals": {
+        "pid:one": 220, "pid:two": 0, "too-high": 256, "boolean": True,
+        "negative": -1,
+    }}), encoding="utf-8")
+    loaded = AppSettings.load(path)
+    assert loaded.friendship_goals == {"pid:one": 220, "pid:two": 0}
+    loaded.save(path)
+    assert AppSettings.load(path).friendship_goals == loaded.friendship_goals
+
+
+@pytest.mark.parametrize("value", [None, [], {}, 42, "missing"])
+def test_invalid_workspace_preference_keeps_legacy_tracker_view(tmp_path, value) -> None:
+    path = tmp_path / "invalid-workspace.json"
+    path.write_text(json.dumps({"workspace_view": value, "tracker_view": "stats"}), encoding="utf-8")
+
+    loaded = AppSettings.load(path)
+
+    assert loaded.workspace_view is None
+    assert loaded.tracker_view == "stats"

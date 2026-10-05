@@ -6,6 +6,8 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+from pokemon_ev_tracker.core.ev_training import EVYield
+
 EV_STAT_LABELS = (
     ("hp", "HP"),
     ("attack", "Attack"),
@@ -34,6 +36,12 @@ def get_ev_yield(species_id: int) -> dict[str, int] | None:
     if values is None:
         return None
     return {stat: int(values[stat]) for stat, _label in EV_STAT_LABELS}
+
+
+def get_training_ev_yield(species_id: int) -> EVYield | None:
+    """Adapt the existing Platinum catalog to the game-neutral training engine."""
+    values = get_ev_yield(species_id)
+    return EVYield(**values) if values is not None else None
 
 
 def format_ev_yield(species_id: int) -> str:

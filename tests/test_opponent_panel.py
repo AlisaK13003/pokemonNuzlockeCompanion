@@ -82,12 +82,12 @@ def test_double_battle_entries_stack_only_at_narrow_width(monkeypatch) -> None:
 
     panel.resize(560, 400)
     app.processEvents()
-    assert panel.layout().direction() == QBoxLayout.Direction.TopToBottom
+    assert panel.opponents_layout.direction() == QBoxLayout.Direction.TopToBottom
     assert panel.maximumHeight() >= 200
 
     panel.resize(900, 400)
     app.processEvents()
-    assert panel.layout().direction() == QBoxLayout.Direction.LeftToRight
+    assert panel.opponents_layout.direction() == QBoxLayout.Direction.LeftToRight
     assert panel.maximumHeight() < 200
     panel.close()
 

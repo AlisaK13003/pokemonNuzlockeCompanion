@@ -123,4 +123,5 @@ PLATINUM_NUZLOCKE_PROFILE = NuzlockeGameProfile(
     display_name="Pokémon Platinum",
     locations=PLATINUM_NUZLOCKE_LOCATIONS,
     level_caps=PLATINUM_LEVEL_CAPS,
+    retired_default_locations=PLATINUM_RETIRED_DEFAULT_LOCATIONS,
 )
