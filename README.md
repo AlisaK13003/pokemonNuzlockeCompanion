@@ -1,71 +1,47 @@
-# Pokémon Platinum EV Tracker
+# Pokémon Nuzlocke Companion
 
-A real-time Pokémon Platinum EV tracker that reads party data directly from BizHawk/EmuHawk Nintendo DS memory. It displays decoded party records and actual EV values; it does not infer EVs from battles or screenshots.
+A Windows desktop companion for **Pokémon Platinum** running in BizHawk/EmuHawk. It reads live Nintendo DS memory to show your party, help plan EV training, and maintain a Nuzlocke run. The app runs locally; it does not need a cloud service or a runtime API.
 
-## Features
+Pokémon Platinum is the only supported game today. The application has a [game provider and capability boundary](docs/game_provider_architecture.md) for future integrations, but it does not interpret an unknown game's RAM as Platinum data.
 
-- Live party species, nicknames, levels, HP, held items, and EV values
-- Per-Pokémon EV change history and configurable PID-keyed EV targets
-- Animated sprites with static Platinum sprites as fallback, plus held-item icons
-- Compact always-on-top mode for use beside EmuHawk
-- RAM diagnostics for the BizHawk connection and decoded party records
-- Nuzlocke run tracking with advisory party-acquisition suggestions; automatic detection requires the Pokémon to appear in the party, so captures sent directly to PC boxes are not detected
+## What it does
 
-## Screenshots
+- **Training:** Shows decoded EVs for the selected party Pokémon, saves allowed EV stats by Pokémon identity, and rates current opponents as good, mixed, or avoid based on their **base species EV yields**. These are recommendations, not a measurement of EVs awarded after held-item, Pokérus, or participation effects. EV change history remains available.
+- **Party Stats:** Shows live HP, battle stats, IVs, nature, ability, friendship, held item, and Generation IV move details, including current and maximum PP where the party data is valid.
+- **Friendship Walk:** Provides guarded walking controls, a selected Pokémon and friendship goal, session progress, and an approximate active-walking ETA. Use it only in a safe area you have checked yourself. The app pauses or releases input when its safety conditions require it; coordinate changes are only a proxy for game steps.
+- **Nuzlocke:** Tracks runs, encounters, deaths, PC-box observations, major fights and level caps, and run history. It can suggest party or box acquisitions and prompt for death or full-party-wipe review when reliable live data is available. You review consequential run decisions; PC detection requires a validated monitor and is not guaranteed for every capture or emulator state.
+- **Diagnostics:** Shows connection and RAM health, decoded party records, and advanced Platinum PC and coordinate tools. PC monitoring and discovery are presented only when the active game provider supports them.
+- **Compact mode:** Keeps dedicated Training, Party Stats, and Nuzlocke workspaces available in a smaller, always-on-top window.
 
-Screenshots are not included yet.
+The displayed EV values come from decoded party records. Battle recommendations and Nuzlocke detections are separate aids and do not rewrite those values.
 
-## Supported Games
+## Supported setup
 
 | Game | Emulator | Status |
 | --- | --- | --- |
-| Pokémon Platinum | BizHawk / EmuHawk | Supported |
+| Pokémon Platinum | BizHawk / EmuHawk with a Nintendo DS core | Supported |
 
-## Architecture
+You need Windows 10 or later, Python 3.12 or later, BizHawk/EmuHawk, and your own legally obtained Pokémon Platinum game copy. ROMs, save files, and emulator binaries are not included.
 
-EmuHawk/BizHawk -> Lua RAM reader -> localhost TCP or temporary-file transport -> Python Platinum decoder -> common tracker models -> PySide6 UI.
-
-The Lua reader enumerates memory domains at runtime and does not assume an NDS RAM domain name. The app has no cloud service or runtime API dependency.
-
-## Requirements
-
-- Windows 10 or later
-- Python 3.12+
-- BizHawk/EmuHawk with a Nintendo DS core
-- Your own legally obtained Pokémon Platinum game copy
-
-ROMs, save files, and emulator binaries are not included. You must supply your own game copy and emulator.
-
-## License and Third-Party Assets
-
-Original project source code is licensed under the MIT License in [LICENSE](LICENSE). Bundled sprites and item artwork are third-party assets with separate ownership and terms; they are not licensed under this project's MIT License. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for source attribution and rights details. This unofficial project is not affiliated with Pokémon; Nintendo, The Pokémon Company, Game Freak, and other rights holders retain their respective trademarks and artwork.
-
-## Installation
+## Install
 
 ```powershell
-git clone https://github.com/AlisaK13003/pokemonEV-Tracker.git
-cd pokemonEV-Tracker
+git clone https://github.com/AlisaK13003/pokemonNuzlockeCompanion.git
+cd pokemonNuzlockeCompanion
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-Contributors can install the test, lint, and build tools with:
+## Run
 
-```powershell
-python -m pip install -e ".[dev]"
-```
+1. Launch EmuHawk and load Pokémon Platinum with the Nintendo DS core.
+2. Open **Tools → Lua Console** and run `bizhawk/ev_tracker.lua` from this checkout.
+3. Start the desktop app with `pokemon-ev-tracker` or `python -m pokemon_ev_tracker`.
+4. Wait for the BizHawk connection and a valid party snapshot before relying on live panels.
 
-## Running
-
-1. Launch EmuHawk and load your Pokémon Platinum game with the Nintendo DS core.
-2. Open **Tools → Lua Console**.
-3. Load `bizhawk/ev_tracker.lua` from the repository checkout and start the script.
-4. Launch the tracker with `pokemon-ev-tracker` or `python -m pokemon_ev_tracker`.
-5. Wait for **BizHawk RAM • CONNECTED** and the decoded party to appear.
-
-The app stores settings and EV targets in `%LOCALAPPDATA%\PokemonEVTracker` on Windows. The Lua fallback transport file is written to the system temporary directory, outside the checkout. Both TCP and file communication remain local to the machine.
+The Lua reader sends data through localhost TCP, with a system-temporary-file fallback. It enumerates memory domains at runtime. Settings, Nuzlocke runs, and training preferences are stored under `%LOCALAPPDATA%\PokemonEVTracker` on Windows. The app does not bundle sample party data.
 
 ## Development
 
@@ -76,13 +52,8 @@ ruff check .
 python -m build
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/architecture.md](docs/architecture.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development practices and [game provider architecture](docs/game_provider_architecture.md) for the integration boundary and new-game checklist. Feature details are in the [Training](docs/ev_training_preferences.md), [move catalog](docs/gen4_move_catalog.md), and [Friendship Walk](docs/friendship_walk_eta.md) notes.
 
-## Adding Another Game
+## License and assets
 
-Future game integrations belong under `src/pokemon_ev_tracker/games/<game>/`, for example `games/emerald/` or `games/firered/`. Keep each game's RAM layout and decoder separate from the reusable tracker core and UI; these game integrations are not currently implemented.
-
-## Credits
-
-- Bundled Pokémon and item sprite assets are attributed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The upstream rights statement and its limitations are documented there.
-- Generation IV structure and Platinum memory research: [pret/pokeplatinum](https://github.com/pret/pokeplatinum).
+Original project source code is licensed under the [MIT License](LICENSE). Bundled Pokémon sprites and item artwork have separate ownership and terms; see [third-party notices](THIRD_PARTY_NOTICES.md). This unofficial project is not affiliated with Nintendo, The Pokémon Company, or Game Freak.
