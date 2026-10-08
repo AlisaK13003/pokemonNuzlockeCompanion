@@ -34,6 +34,13 @@ from pokemon_ev_tracker.games.platinum.pc_sram_search import (
 )
 from pokemon_ev_tracker.games.platinum.species import load_gen4_species
 from pokemon_ev_tracker.pokemon.gen4.structure import decode_box_pokemon
+from pokemon_ev_tracker.transport.protocol import (
+    MalformedFamily,
+    MessageRoute,
+    classify_malformed_line,
+    parse_protocol_line,
+    raw_json_integer,
+)
 
 LOGGER = logging.getLogger(__name__)
 NDS_MAIN_RAM_BASE = 0x02000000
@@ -1446,13 +1453,13 @@ class BizHawkDebugServer:
                     self._coordinate_file_capture_id = None
 
     def _record_line(self, line: str, source: str) -> None:
-        raw_line = line.rstrip("\r\n")
-        line = raw_line.strip()
-        if not line:
+        parsed = parse_protocol_line(line)
+        if parsed.route is MessageRoute.EMPTY:
             return
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError as exc:
+        line = parsed.line
+        if parsed.error is not None:
+            exc = parsed.error
+            raw_line = parsed.raw_line
             LOGGER.warning(
                 "Invalid BizHawk JSON line: source=%s raw_line_length=%d "
                 "json_error=%s char_offset=%d prefix=%r suffix=%r",
@@ -1463,7 +1470,8 @@ class BizHawkDebugServer:
                 raw_line[:200],
                 raw_line[-200:],
             )
-            if "pc_discovery_" in line:
+            family = classify_malformed_line(line)
+            if family is MalformedFamily.PC_DISCOVERY:
                 with self._pc_discovery_lock:
                     active = self._pc_discovery_scan
                     if active is not None and active.scan_id in line:
@@ -1499,7 +1507,7 @@ class BizHawkDebugServer:
                                 self._fail_active_pc_discovery_locked(
                                     active, source, error
                                 )
-            elif "pc_pokemon_search_" in line:
+            elif family is MalformedFamily.POKEMON_SEARCH:
                 with self._pc_discovery_lock:
                     search = self._pc_pokemon_search
                     if (
@@ -1513,7 +1521,7 @@ class BizHawkDebugServer:
                             f"{exc.msg} at character {exc.pos}.",
                             source,
                         )
-            elif "pc_save_offset_test_" in line:
+            elif family is MalformedFamily.SAVE_OFFSET:
                 with self._pc_save_test_lock:
                     active = self._pc_save_offset_test_active
                     if active is not None and active["test_id"] in line:
@@ -1523,7 +1531,7 @@ class BizHawkDebugServer:
                             f"{exc.msg} at character {exc.pos}.",
                             source,
                         )
-            elif "pc_sram_search_" in line:
+            elif family is MalformedFamily.SRAM_SEARCH:
                 with self._pc_sram_search_lock:
                     active = self._pc_sram_search_active
                     if active is not None and active["scan_id"] in line:
@@ -1547,10 +1555,12 @@ class BizHawkDebugServer:
                             {"type": "pc_sram_search_result", "error": error}, source
                         )
             return
-        if not isinstance(payload, dict):
+        payload = parsed.payload
+        if payload is None:
             return
         message_type = payload.get("type")
-        if message_type == "transport_file_reset":
+        route = parsed.route
+        if route is MessageRoute.FILE_RESET:
             try:
                 old_size = int(payload.get("old_size") or 0)
                 new_size = int(payload.get("new_size") or 0)
@@ -1564,7 +1574,7 @@ class BizHawkDebugServer:
                 str(payload.get("initiator") or "Lua fallback writer"),
             )
             return
-        if isinstance(message_type, str) and message_type.startswith("coordinate_scan_"):
+        if route is MessageRoute.COORDINATE:
             if message_type in {"coordinate_scan_end", "coordinate_scan_error"}:
                 with self._coordinate_file_lock:
                     if payload.get("capture_id") == self._coordinate_file_capture_id:
@@ -1574,33 +1584,19 @@ class BizHawkDebugServer:
             except queue.Full:
                 LOGGER.warning("Dropping coordinate discovery event because its queue is full.")
             return
-        if isinstance(message_type, str) and message_type.startswith(
-            "pc_save_offset_test_"
-        ):
+        if route is MessageRoute.SAVE_OFFSET:
             self._record_pc_save_offset_test_event(payload, source)
             return
-        if isinstance(message_type, str) and message_type.startswith("pc_sram_search_"):
+        if route is MessageRoute.SRAM_SEARCH:
             self._record_pc_sram_search_event(payload, source)
             return
-        if message_type in {
-            "pc_discovery_started",
-            "pc_discovery_chunk",
-            "pc_discovery_complete",
-            "pc_discovery_end",
-            "pc_discovery_cancelled",
-            "pc_discovery_failed",
-            "pc_session_pc_resolver_cache_result",
-            "pc_storage_cache_ready",
-            "pc_storage_cache_rejected",
-        }:
+        if route is MessageRoute.PC_DISCOVERY:
             self._record_pc_discovery_event(payload, source)
             return
-        if isinstance(message_type, str) and message_type.startswith("pc_pokemon_search_"):
+        if route is MessageRoute.POKEMON_SEARCH:
             self._record_pc_pokemon_search_event(payload, source)
             return
-        if isinstance(message_type, str) and message_type.startswith(
-            "pc_structure_pointer_search_"
-        ):
+        if route is MessageRoute.POINTER_SEARCH:
             self._record_pc_structure_pointer_search_event(payload, source)
             return
         with self._lock:
@@ -1610,11 +1606,11 @@ class BizHawkDebugServer:
                 source=source,
                 bytes_received=len(line.encode("utf-8")),
             )
-            if message_type == "heartbeat":
+            if route is MessageRoute.HEARTBEAT:
                 self._heartbeat = received
-            elif message_type == "party_memory":
+            elif route is MessageRoute.PARTY:
                 self._party_payload = received
-            elif message_type == "pc_storage":
+            elif route is MessageRoute.PC_STORAGE:
                 self._pc_storage_payload = received
                 if (
                     payload.get("pc_storage_discovery_requested") is True
@@ -1629,7 +1625,7 @@ class BizHawkDebugServer:
                         payload.get("pc_storage_anchor_result"),
                         payload.get("pc_storage_anchor_address"),
                     )
-        if message_type == "pc_storage":
+        if route is MessageRoute.PC_STORAGE:
             self._confirm_pc_cache_from_storage(payload, source)
 
     def _confirm_pc_cache_from_storage(self, payload: dict[str, Any], source: str) -> None:
@@ -3260,8 +3256,7 @@ class BizHawkDebugServer:
 
     @staticmethod
     def _raw_json_integer(line: str, field: str) -> int | None:
-        match = re.search(rf'"{re.escape(field)}"\s*:\s*(-?\d+)', line)
-        return int(match.group(1)) if match else None
+        return raw_json_integer(line, field)
 
     def _fail_active_pc_discovery_locked(
         self,

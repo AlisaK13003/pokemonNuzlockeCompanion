@@ -104,6 +104,15 @@ Confirmation actions and discovery dispatch remain in the UI layer. Coordinator
 queries expose counts/readiness and existing observer decisions without copying
 or moving authoritative run data.
 
+`transport/protocol.py` decodes individual NDJSON lines and classifies message
+families through pure helpers and a frozen `ParsedLine`. It preserves standard
+JSON acceptance, original/normalized text and parser error details; malformed
+family/integer hints do not authorize recovery. BizHawkDebugServer retains framing,
+socket/file IO, all locks, publication timestamps/byte counts, commands, lifecycle,
+active-scan validation, retry/timeout decisions and game-specific discovery work.
+Classification chooses existing explicit dispatch branches, without a routing bus
+or new authoritative transport state.
+
 See [the first engineering audit and measurements](refactor-roadmap.md) for the
 baseline, bounded initial implementation, regression gates and later phases.
 

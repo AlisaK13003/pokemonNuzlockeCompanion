@@ -1030,3 +1030,121 @@ a larger PC runtime controller more safely than extracting transport or the enti
 poll. Do not proceed automatically. Live PC discovery/reconnect and confirmation
 smoke checks remain manual; this pass uses deterministic snapshots and isolated
 stores. No user save data, commits or pushes were involved.
+
+## Phase D1 audit and boundary (before implementation)
+
+The explicit D1 request supersedes C5's suggested next UI slice. Audited Lua JSON
+generation/send queues, server socket/file readers, `_record_line`, data-source
+snapshot consumers, command dispatch/ACK fields and PC recovery/retry paths.
+
+Lua emits the same newline-terminated JSON through ordered TCP pending/queued
+lines or temporary-file fallback. Python TCP uses text `readline`; fallback uses
+binary complete-line checks, retains trailing fragments and resets on truncation.
+Coordinate capture has a separate file/queue and its own completion handling.
+The server parses one complete line, ignores blanks/nonobjects, logs malformed
+JSON, routes event families, then publishes heartbeat/party/PC records under its
+existing lock. Battle and walk ACK information travels unchanged inside party
+payloads; the data-source and UI consume those fields. Unknown object messages
+do not replace snapshots. Event-family prefixes accept future suffixes where they
+already did; PC discovery uses an exact message set.
+
+Malformed discovery/search/save/SRAM lines are special: active scan IDs, retry
+state, error publication and lock scopes determine recovery. They cannot become
+pure routing policy. Server retains those decisions, all socket/file lifecycle,
+command locks/queues/sequences, publication timestamps/byte counts, timeouts,
+cache confirmation and game-specific discovery analysis. Existing raw chunk/scan
+bounds, queue limits and retry safeguards remain at their current owners. There
+is no general TCP line-size cap to preserve; D1 does not invent one.
+
+Selected boundary: a pure `transport/protocol.py` module for whitespace/NDJSON
+decoding, object/message-family classification, malformed-line family hints and
+the existing best-effort raw integer extraction. Typed immutable parse results
+carry original/normalized line, payload, route and JSON error. Server dispatch is
+explicit and remains stateful; no event bus, registry, lock or extra thread moves.
+Legacy JSON acceptance and unusual field behavior are characterized, including
+unhashable `type` raising TypeError rather than silently adding hardening in D1.
+
+Before edits: focused **95 passed in 11.25s**, full suite **920 passed in 171.05s**,
+Ruff/diff checks and sdist/wheel builds passed. Twenty-one new characterization
+cases passed in 0.27s for family dispatch/source fidelity, malformed/nonobjects,
+UTF-8 byte counts, unknown messages, session/ACK fields, coordinate order,
+TCP fragments/multiple messages/reconnect and concurrent producer order.
+
+## Phase D1: pure NDJSON protocol boundary
+
+Implemented D1 only. New `transport/protocol.py` provides `parse_protocol_line`,
+`classify_message_type`, `classify_malformed_line` and `raw_json_integer`, using
+stdlib JSON/regex and immutable enums/results. `ParsedLine` carries raw/trimmed
+text, decoded payload, route and original JSONDecodeError. Payloads are not copied
+or normalized beyond existing whitespace/JSON behavior. An immutable exact PC
+discovery type set is a protocol constant, not a mutable handler registry.
+
+`_record_line` now delegates decoding/classification and follows its existing
+explicit branches. Publication uses the route once without repeating string
+classification. Malformed scan/error branches keep their original lock scopes,
+active ID checks, retry counters and failure wording; the helper's substring
+family hint alone cannot cause retries or confirmation. The existing private
+static integer-helper interface delegates to the pure helper for compatibility.
+
+Server remains sole owner of IO, stream framing, synchronization, authoritative
+snapshot state, clocks/byte counting, command routes/sequences, retry/timeouts,
+shutdown/reconnection and PC discovery/cache analysis. No new threads, protocol
+schema, size cap, game contract or Lua changes were introduced. Parsed results
+are ephemeral; no shadow snapshot cache exists. TCP/file readers and lock ordering
+are unchanged. C1–C5, UI appearance, backup scheduling and command safety are intact.
+
+AST spans: server class **5,011 → 4,999** lines; `_record_line` **186 → 175**.
+The modest line change is intentional: stateful dispatch/recovery remains visibly
+in the server, while pure protocol rules can be tested without constructing it.
+
+### Tests and measurements
+
+Added **71 cases**: 21 pre-extraction reception/dispatch characterization cases
+and 50 independent pure-protocol cases. Coverage includes all exact discovery
+types, future prefix families, unknown/numeric/missing type fields, preserved
+unhashable-type exceptions, empty/nonobject/malformed JSON, whitespace/BOM/error
+offsets, duplicate JSON keys, Unicode, standard non-finite JSON acceptance,
+malformed-family precedence and legacy best-effort integer extraction. Server
+coverage includes TCP fragmented/multiple lines/reconnect, concurrent source order,
+coordinate completion ordering, source/session/ACK/battle-field fidelity and
+normalized UTF-8 byte counts. Existing fallback partial/truncation/startup, cache
+confirmation, chunk retry/timeout, command-file queues and walking transport tests
+remain part of focused/full verification. No live emulator is required.
+
+Before production changes: full **920 passed in 171.05s**, focused **95 passed in
+11.25s**, Ruff/diff checks and sdist/wheel builds passed. After extraction: focused
+**166 passed in 10.01s**, complete suite **991 passed in 173.95s**. Ruff/diff
+checks and both sdist/wheel builds passed after extraction as well.
+
+`benchmarks/protocol_lines.py` compares the locally captured original server with
+the current implementation, with seven rounds of 2,000 lines each and no concurrent
+tests. Results are in `benchmarks/results/protocol-before.json` and
+`protocol-after.json`. Each route includes JSON decoding/dispatch; PC chunk event
+analysis is deliberately stubbed to isolate the transport boundary.
+
+| Receive-line median | Before | After |
+| --- | --- | --- |
+| Heartbeat | 4.055 µs | 5.190 µs |
+| Party (2,840 hex characters) | 7.245 µs | 8.664 µs |
+| PC chunk (8,192 hex characters, stubbed handler) | 10.772 µs | 12.418 µs |
+
+Typed result creation and helper/enum dispatch add approximately 1.1–1.7µs per
+line in this fixture; no speedup is claimed. Measurements exclude socket/file IO,
+contention, live RAM validation and discovery analysis, so they are not emulator
+latency or throughput guarantees. Malformed JSON behavior is regression-tested
+rather than benchmarked with warning output.
+
+### Remaining risk and next bounded slice
+
+Server still concentrates discovery analysis, synchronization and several game-
+specific workflows. Invalid unhashable `type` fields retain the legacy TypeError
+contract, and standard JSON non-finite values remain accepted; hardening would be
+a separately authorized behavior change. Coordinate-file completion still parses
+its lines separately after dispatch. No attempt was made to redesign that path.
+
+A bounded D2 candidate is characterization of shared stream-framing contracts
+(complete-line retention/startup/rotation) and eliminating coordinate-file duplicate
+decoding while preserving its completion/position locking and public dispatch
+interface. Do not automatically start D2 or extract the full discovery controller.
+Live Lua/TCP/fallback reconnect and active-scan smoke checks remain manual validation
+work. The Lua reader, game-provider contracts and user save data were not modified.
