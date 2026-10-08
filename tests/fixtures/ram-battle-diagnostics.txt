@@ -1,0 +1,111 @@
+Source: file
+RAM connection: STALE / DISCONNECTED
+RAM source: file
+Last RAM age: --
+Command channel: UNKNOWN
+Command transport: --
+Last command sequence: --
+Last Lua ack sequence: --
+Last Lua ack frame: --
+Last Lua ack action: --
+Last ack age: --
+Mode: Horizontal (X)
+Current direction: --
+Previous direction: --
+Injected direction: --
+B injected: --
+Friendship Walk enabled: --
+Lua walk status: --
+Lua reversal until frame: --
+Relevant axis value: --
+Last axis change frame: --
+Current emulator frame: 123
+Frames since axis change: --
+Blocked timeout: -- frames
+Reversal grace: 0 / 0 frames
+Successful moves since reversal: 0 / 0
+Wall detection armed: --
+State: UNKNOWN
+Manual override detection: DISABLED
+Pause reason: --
+Frame: 123
+Domain: Main RAM
+Player X: --
+Player Y: --
+Delta X: --
+Delta Y: --
+Coordinate offsets: -- / -- (signed 16-bit LE; validated)
+Friendship Walk: Idle; successful moves this session: 0
+Pointer address: --
+Pointer offset: --
+Pointer value: 0x022711C8
+Party relative offset: --
+Party address: --
+Party offset: --
+Party records address: --
+Party records offset: --
+Offset candidates:
+
+Battle Battlers (candidate offsets/fields; validate in gameplay):
+Base pointer: 0x022711C8
+Battler 0 - Player 1
+Relative offset: 0x54598
+Record address: 0x022C5760
+Species ID: 183; species: Marill
+Level: 17; current HP (diagnostic): 30 / 53
+Max HP candidate at +0x4E (diagnostic): 53
+HP region raw (+0x48..+0x53): 00 00 00 00 1E 00 35 00 00 00 00 00
+Candidate stats: attack=27, defense=27, speed=27, special_attack=27, special_defense=27
+Candidate PID: 0x12345678
+Candidate ability ID: 26; candidate held item ID: 215
+Candidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Validation state: ACTIVE
+Raw record: B7 00 1B 00 1B 00 1B 00 1B 00 1B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+Battler 1 - Enemy 1
+Relative offset: 0x54658
+Record address: 0x022C5820
+Species ID: 66; species: Machop
+Level: 14; current HP (diagnostic): 20 / 30
+Max HP candidate at +0x4E (diagnostic): 30
+HP region raw (+0x48..+0x53): 00 00 00 00 14 00 1E 00 00 00 00 00
+Candidate stats: attack=15, defense=15, speed=15, special_attack=15, special_defense=15
+Candidate PID: 0x12345678
+Candidate ability ID: 26; candidate held item ID: 215
+Candidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Validation state: ACTIVE
+Raw record: 42 00 0F 00 0F 00 0F 00 0F 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 0E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 14 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+Battler 2 - Player 2 / Partner
+Relative offset: 0x54718
+Record address: 0x022C58E0
+Species ID: 183; species: Marill
+Level: 17; current HP (diagnostic): 30 / 53
+Max HP candidate at +0x4E (diagnostic): 53
+HP region raw (+0x48..+0x53): 00 00 00 00 1E 00 35 00 00 00 00 00
+Candidate stats: attack=27, defense=27, speed=27, special_attack=27, special_defense=27
+Candidate PID: 0x12345678
+Candidate ability ID: 26; candidate held item ID: 215
+Candidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Validation state: ACTIVE
+Raw record: B7 00 1B 00 1B 00 1B 00 1B 00 1B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+Battler 3 - Enemy 2
+Relative offset: 0x547D8
+Record address: 0x022C59A0
+Species ID: 74; species: Geodude
+Level: 14; current HP (diagnostic): 20 / 30
+Max HP candidate at +0x4E (diagnostic): 30
+HP region raw (+0x48..+0x53): 00 00 00 00 14 00 1E 00 00 00 00 00
+Candidate stats: attack=15, defense=15, speed=15, special_attack=15, special_defense=15
+Candidate PID: 0x12345678
+Candidate ability ID: 26; candidate held item ID: 215
+Candidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Validation state: ACTIVE
+Raw record: 4A 00 0F 00 0F 00 0F 00 0F 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 0E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 14 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+Currently Battling:
+Enemy 1: Machop, Lv. 14, HP 20 / 30; Base EV Yield: EV yield: +1 Attack
+Enemy 2: Geodude, Lv. 14, HP 20 / 30; Base EV Yield: EV yield: +1 Defense
+
+No occupied party slots reported.

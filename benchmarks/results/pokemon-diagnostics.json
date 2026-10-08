@@ -1,0 +1,446 @@
+{
+  "before": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "qt_platform": "offscreen",
+    "live_bizhawk": false,
+    "startup_fixture_ms": 814.9948,
+    "party_adapter_unchanged": {
+      "median_ms": 3.8974,
+      "round_ms": [
+        3.9015,
+        3.8974,
+        3.7841,
+        4.0275,
+        3.839
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "full_ui_poll_unchanged": {
+      "median_ms": 5.6313,
+      "round_ms": [
+        5.6313,
+        5.5602,
+        5.6224,
+        6.9443,
+        6.6315
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "profile_calls_30_polls": {
+      "resolve_move": 0,
+      "refresh_style": 4350,
+      "_refresh_tracker_stats_metadata": 180,
+      "_refresh_ram_party_debug": 30,
+      "_refresh_training_recommendations": 30
+    },
+    "phase_b": {
+      "unchanged_snapshot": {
+        "median_ms": 0.0164,
+        "round_ms": [
+          0.0169,
+          0.0164,
+          0.0164,
+          0.0163,
+          0.0162
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "changed_pair": {
+        "median_ms": 3.602,
+        "round_ms": [
+          3.602,
+          3.5136,
+          3.5623,
+          3.6648,
+          3.9165
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "invalid_valid_pair": {
+        "median_ms": 3.6361,
+        "round_ms": [
+          3.6361,
+          3.5186,
+          3.8242,
+          3.5183,
+          3.6637
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "calls_30_unchanged": {
+        "_decode_raw_party": 0,
+        "decode_party_pokemon": 0,
+        "replace": 0,
+        "snapshot": 60
+      },
+      "unchanged_traced_bytes": {
+        "retained": 280,
+        "peak": 2880
+      },
+      "last_good_entries": 6,
+      "decode_calls_30_changed_pairs": 59,
+      "decode_calls_30_invalid_valid_pairs": 60,
+      "cold_snapshot_traced_bytes": {
+        "retained": 34265,
+        "peak": 104852
+      },
+      "full_ui_poll_unchanged": {
+        "median_ms": 6.6493,
+        "round_ms": [
+          7.3862,
+          7.2518,
+          6.5409,
+          6.4225,
+          6.6493
+        ],
+        "iterations": 30,
+        "rounds": 5
+      }
+    },
+    "phase_c1": {
+      "active_unchanged_poll": {
+        "median_ms": 7.5078,
+        "round_ms": [
+          6.8352,
+          7.0548,
+          7.7319,
+          7.5078,
+          7.8705
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "calls_30_active_polls": {
+        "_refresh_training_recommendations": 30,
+        "recommend_battle_evs": 0,
+        "_refresh_ram_party_debug": 30
+      },
+      "changed_opponent_pair": {
+        "median_ms": 26.9309,
+        "round_ms": [
+          27.4162,
+          26.9309,
+          27.0678,
+          26.2766,
+          25.6312
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "diagnostic_text_formatting": {
+        "median_ms": 0.044,
+        "round_ms": [
+          0.0435,
+          0.0483,
+          0.0436,
+          0.0535,
+          0.044
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "diagnostic_text": "Source: file\nRAM connection: STALE / DISCONNECTED\nRAM source: file\nLast RAM age: --\nCommand channel: UNKNOWN\nCommand transport: --\nLast command sequence: --\nLast Lua ack sequence: --\nLast Lua ack frame: --\nLast Lua ack action: --\nLast ack age: --\nMode: Horizontal (X)\nCurrent direction: --\nPrevious direction: --\nInjected direction: --\nB injected: --\nFriendship Walk enabled: --\nLua walk status: --\nLua reversal until frame: --\nRelevant axis value: --\nLast axis change frame: --\nCurrent emulator frame: 123\nFrames since axis change: --\nBlocked timeout: -- frames\nReversal grace: 0 / 0 frames\nSuccessful moves since reversal: 0 / 0\nWall detection armed: --\nState: UNKNOWN\nManual override detection: DISABLED\nPause reason: --\nFrame: 123\nDomain: Main RAM\nPlayer X: --\nPlayer Y: --\nDelta X: --\nDelta Y: --\nCoordinate offsets: -- / -- (signed 16-bit LE; validated)\nFriendship Walk: Idle; successful moves this session: 0\nPointer address: --\nPointer offset: --\nPointer value: 0x022711C8\nParty relative offset: --\nParty address: --\nParty offset: --\nParty records address: --\nParty records offset: --\nOffset candidates:\n\nBattle Battlers (candidate offsets/fields; validate in gameplay):\nBase pointer: 0x022711C8\nBattler 0 - Player 1\nRelative offset: 0x54598\nRecord address: 0x022C5760\nSpecies ID: 183; species: Marill\nLevel: 17; current HP (diagnostic): 30 / 53\nMax HP candidate at +0x4E (diagnostic): 53\nHP region raw (+0x48..+0x53): 00 00 00 00 1E 00 35 00 00 00 00 00\nCandidate stats: attack=27, defense=27, speed=27, special_attack=27, special_defense=27\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: B7 00 1B 00 1B 00 1B 00 1B 00 1B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nBattler 1 - Enemy 1\nRelative offset: 0x54658\nRecord address: 0x022C5820\nSpecies ID: 66; species: Machop\nLevel: 14; current HP (diagnostic): 20 / 30\nMax HP candidate at +0x4E (diagnostic): 30\nHP region raw (+0x48..+0x53): 00 00 00 00 14 00 1E 00 00 00 00 00\nCandidate stats: attack=15, defense=15, speed=15, special_attack=15, special_defense=15\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: 42 00 0F 00 0F 00 0F 00 0F 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 0E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 14 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nBattler 2 - Player 2 / Partner\nRelative offset: 0x54718\nRecord address: 0x022C58E0\nSpecies ID: 183; species: Marill\nLevel: 17; current HP (diagnostic): 30 / 53\nMax HP candidate at +0x4E (diagnostic): 53\nHP region raw (+0x48..+0x53): 00 00 00 00 1E 00 35 00 00 00 00 00\nCandidate stats: attack=27, defense=27, speed=27, special_attack=27, special_defense=27\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: B7 00 1B 00 1B 00 1B 00 1B 00 1B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nBattler 3 - Enemy 2\nRelative offset: 0x547D8\nRecord address: 0x022C59A0\nSpecies ID: 74; species: Geodude\nLevel: 14; current HP (diagnostic): 20 / 30\nMax HP candidate at +0x4E (diagnostic): 30\nHP region raw (+0x48..+0x53): 00 00 00 00 14 00 1E 00 00 00 00 00\nCandidate stats: attack=15, defense=15, speed=15, special_attack=15, special_defense=15\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: 4A 00 0F 00 0F 00 0F 00 0F 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 0E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 14 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nCurrently Battling:\nEnemy 1: Machop, Lv. 14, HP 20 / 30; Base EV Yield: EV yield: +1 Attack\nEnemy 2: Geodude, Lv. 14, HP 20 / 30; Base EV Yield: EV yield: +1 Defense\n\nNo occupied party slots reported."
+    },
+    "phase_c2": {
+      "party_diagnostic_refresh": {
+        "median_ms": 0.0732,
+        "round_ms": [
+          0.0732,
+          0.0926,
+          0.0722,
+          0.0669,
+          0.0795
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "boxed_diagnostic_refresh": {
+        "median_ms": 0.0142,
+        "round_ms": [
+          0.0142,
+          0.0147,
+          0.0139,
+          0.0152,
+          0.0139
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "anchor_inspection_formatting": {
+        "median_ms": 0.0126,
+        "round_ms": [
+          0.0129,
+          0.0126,
+          0.012,
+          0.0132,
+          0.012
+        ],
+        "iterations": 30,
+        "rounds": 5
+      }
+    },
+    "party_decode_same_payload": {
+      "median_ms": 0.0028,
+      "round_ms": [
+        0.0079,
+        0.0028,
+        0.0026,
+        0.004,
+        0.0027
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "transport_party_line": {
+      "median_ms": 0.0139,
+      "round_ms": [
+        0.0144,
+        0.0127,
+        0.0117,
+        0.0166,
+        0.0139
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "pc_broad_4mib": {
+      "median_ms": 1285.3438,
+      "round_ms": [
+        1285.3438,
+        1345.1009,
+        1250.8361
+      ],
+      "iterations": 1,
+      "rounds": 3
+    },
+    "pc_broad_peak_traced_bytes": 4322768
+  },
+  "after": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "qt_platform": "offscreen",
+    "live_bizhawk": false,
+    "startup_fixture_ms": 801.5573,
+    "party_adapter_unchanged": {
+      "median_ms": 3.8317,
+      "round_ms": [
+        3.8737,
+        3.8142,
+        3.8039,
+        4.0912,
+        3.8317
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "full_ui_poll_unchanged": {
+      "median_ms": 5.7075,
+      "round_ms": [
+        5.5605,
+        5.7104,
+        5.5922,
+        5.7075,
+        6.4485
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "profile_calls_30_polls": {
+      "resolve_move": 0,
+      "refresh_style": 4350,
+      "_refresh_tracker_stats_metadata": 180,
+      "_refresh_ram_party_debug": 30,
+      "_refresh_training_recommendations": 30
+    },
+    "phase_b": {
+      "unchanged_snapshot": {
+        "median_ms": 0.0165,
+        "round_ms": [
+          0.0161,
+          0.0165,
+          0.0159,
+          0.0168,
+          0.0207
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "changed_pair": {
+        "median_ms": 3.4236,
+        "round_ms": [
+          3.9149,
+          3.4312,
+          3.4236,
+          3.2798,
+          3.3777
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "invalid_valid_pair": {
+        "median_ms": 3.2284,
+        "round_ms": [
+          3.4126,
+          3.2284,
+          3.2096,
+          3.2117,
+          3.3409
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "calls_30_unchanged": {
+        "_decode_raw_party": 0,
+        "decode_party_pokemon": 0,
+        "replace": 0,
+        "snapshot": 60
+      },
+      "unchanged_traced_bytes": {
+        "retained": 280,
+        "peak": 2880
+      },
+      "last_good_entries": 6,
+      "decode_calls_30_changed_pairs": 59,
+      "decode_calls_30_invalid_valid_pairs": 60,
+      "cold_snapshot_traced_bytes": {
+        "retained": 34265,
+        "peak": 104852
+      },
+      "full_ui_poll_unchanged": {
+        "median_ms": 6.2772,
+        "round_ms": [
+          6.32,
+          6.5201,
+          6.2772,
+          6.148,
+          6.1419
+        ],
+        "iterations": 30,
+        "rounds": 5
+      }
+    },
+    "phase_c1": {
+      "active_unchanged_poll": {
+        "median_ms": 6.2181,
+        "round_ms": [
+          6.0551,
+          6.2181,
+          6.1342,
+          6.2556,
+          6.3549
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "calls_30_active_polls": {
+        "_refresh_training_recommendations": 30,
+        "recommend_battle_evs": 0,
+        "_refresh_ram_party_debug": 30
+      },
+      "changed_opponent_pair": {
+        "median_ms": 23.12,
+        "round_ms": [
+          22.954,
+          22.8046,
+          23.12,
+          23.674,
+          25.2338
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "diagnostic_text_formatting": {
+        "median_ms": 0.0486,
+        "round_ms": [
+          0.0518,
+          0.0479,
+          0.0496,
+          0.0486,
+          0.0476
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "diagnostic_text": "Source: file\nRAM connection: STALE / DISCONNECTED\nRAM source: file\nLast RAM age: --\nCommand channel: UNKNOWN\nCommand transport: --\nLast command sequence: --\nLast Lua ack sequence: --\nLast Lua ack frame: --\nLast Lua ack action: --\nLast ack age: --\nMode: Horizontal (X)\nCurrent direction: --\nPrevious direction: --\nInjected direction: --\nB injected: --\nFriendship Walk enabled: --\nLua walk status: --\nLua reversal until frame: --\nRelevant axis value: --\nLast axis change frame: --\nCurrent emulator frame: 123\nFrames since axis change: --\nBlocked timeout: -- frames\nReversal grace: 0 / 0 frames\nSuccessful moves since reversal: 0 / 0\nWall detection armed: --\nState: UNKNOWN\nManual override detection: DISABLED\nPause reason: --\nFrame: 123\nDomain: Main RAM\nPlayer X: --\nPlayer Y: --\nDelta X: --\nDelta Y: --\nCoordinate offsets: -- / -- (signed 16-bit LE; validated)\nFriendship Walk: Idle; successful moves this session: 0\nPointer address: --\nPointer offset: --\nPointer value: 0x022711C8\nParty relative offset: --\nParty address: --\nParty offset: --\nParty records address: --\nParty records offset: --\nOffset candidates:\n\nBattle Battlers (candidate offsets/fields; validate in gameplay):\nBase pointer: 0x022711C8\nBattler 0 - Player 1\nRelative offset: 0x54598\nRecord address: 0x022C5760\nSpecies ID: 183; species: Marill\nLevel: 17; current HP (diagnostic): 30 / 53\nMax HP candidate at +0x4E (diagnostic): 53\nHP region raw (+0x48..+0x53): 00 00 00 00 1E 00 35 00 00 00 00 00\nCandidate stats: attack=27, defense=27, speed=27, special_attack=27, special_defense=27\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: B7 00 1B 00 1B 00 1B 00 1B 00 1B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nBattler 1 - Enemy 1\nRelative offset: 0x54658\nRecord address: 0x022C5820\nSpecies ID: 66; species: Machop\nLevel: 14; current HP (diagnostic): 20 / 30\nMax HP candidate at +0x4E (diagnostic): 30\nHP region raw (+0x48..+0x53): 00 00 00 00 14 00 1E 00 00 00 00 00\nCandidate stats: attack=15, defense=15, speed=15, special_attack=15, special_defense=15\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: 42 00 0F 00 0F 00 0F 00 0F 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 0E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 14 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nBattler 2 - Player 2 / Partner\nRelative offset: 0x54718\nRecord address: 0x022C58E0\nSpecies ID: 183; species: Marill\nLevel: 17; current HP (diagnostic): 30 / 53\nMax HP candidate at +0x4E (diagnostic): 53\nHP region raw (+0x48..+0x53): 00 00 00 00 1E 00 35 00 00 00 00 00\nCandidate stats: attack=27, defense=27, speed=27, special_attack=27, special_defense=27\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: B7 00 1B 00 1B 00 1B 00 1B 00 1B 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nBattler 3 - Enemy 2\nRelative offset: 0x547D8\nRecord address: 0x022C59A0\nSpecies ID: 74; species: Geodude\nLevel: 14; current HP (diagnostic): 20 / 30\nMax HP candidate at +0x4E (diagnostic): 30\nHP region raw (+0x48..+0x53): 00 00 00 00 14 00 1E 00 00 00 00 00\nCandidate stats: attack=15, defense=15, speed=15, special_attack=15, special_defense=15\nCandidate PID: 0x12345678\nCandidate ability ID: 26; candidate held item ID: 215\nCandidate nickname bytes: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\nValidation state: ACTIVE\nRaw record: 4A 00 0F 00 0F 00 0F 00 0F 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 1A 00 00 00 00 00 00 00 00 00 00 00 00 0E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 14 00 1E 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 78 56 34 12 00 00 00 00 00 00 00 00 00 00 00 00 D7 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n\nCurrently Battling:\nEnemy 1: Machop, Lv. 14, HP 20 / 30; Base EV Yield: EV yield: +1 Attack\nEnemy 2: Geodude, Lv. 14, HP 20 / 30; Base EV Yield: EV yield: +1 Defense\n\nNo occupied party slots reported."
+    },
+    "phase_c2": {
+      "party_diagnostic_refresh": {
+        "median_ms": 0.0816,
+        "round_ms": [
+          0.0957,
+          0.0705,
+          0.0816,
+          0.1017,
+          0.0769
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "boxed_diagnostic_refresh": {
+        "median_ms": 0.0172,
+        "round_ms": [
+          0.0181,
+          0.016,
+          0.0186,
+          0.0172,
+          0.0137
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "anchor_inspection_formatting": {
+        "median_ms": 0.0119,
+        "round_ms": [
+          0.0122,
+          0.0118,
+          0.0131,
+          0.0116,
+          0.0119
+        ],
+        "iterations": 30,
+        "rounds": 5
+      }
+    },
+    "party_decode_same_payload": {
+      "median_ms": 0.0025,
+      "round_ms": [
+        0.0024,
+        0.0024,
+        0.0025,
+        0.0026,
+        0.0027
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "transport_party_line": {
+      "median_ms": 0.0114,
+      "round_ms": [
+        0.0089,
+        0.0128,
+        0.0123,
+        0.0114,
+        0.0091
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "pc_broad_4mib": {
+      "median_ms": 1300.1117,
+      "round_ms": [
+        1259.4601,
+        1300.1117,
+        1321.6702
+      ],
+      "iterations": 1,
+      "rounds": 3
+    },
+    "pc_broad_peak_traced_bytes": 4322768
+  }
+}

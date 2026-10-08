@@ -34,9 +34,16 @@ from pokemon_ev_tracker.core.automation.friendship_walk import (
     WalkAxis,
     WalkStatus,
 )
+from pokemon_ev_tracker.core.diagnostic_health import (
+    HealthState,
+    PCMonitoringHealth,
+    PCPhase,
+    observe_command_channel,
+    observe_diagnostic_health,
+)
 from pokemon_ev_tracker.core.ev_changes import EVChangeTracker
 from pokemon_ev_tracker.core.ev_targets import EVTargetStore
-from pokemon_ev_tracker.core.ev_training import EVTrainingPreference, recommend_battle_evs
+from pokemon_ev_tracker.core.ev_training import EVTrainingPreference
 from pokemon_ev_tracker.core.friendship_training import (
     ETAStatus,
     FriendshipETA,
@@ -49,11 +56,16 @@ from pokemon_ev_tracker.core.nuzlocke.acquisition import (
     reconcile_party_encounters,
     reconcile_shiny_encounters,
 )
-from pokemon_ev_tracker.core.nuzlocke.death_detection import PartyHpObserver, PartyHpSample
 from pokemon_ev_tracker.core.nuzlocke.models import PartyLevel
-from pokemon_ev_tracker.core.nuzlocke.run_prompt import NoRunPromptObserver
+from pokemon_ev_tracker.core.nuzlocke.party_lifecycle import PartyLifecycleCoordinator
+from pokemon_ev_tracker.core.nuzlocke.party_snapshot import (
+    frame_number as _frame_number,
+)
+from pokemon_ev_tracker.core.nuzlocke.party_snapshot import (
+    valid_acquisition_snapshot as _valid_acquisition_snapshot,
+)
 from pokemon_ev_tracker.core.nuzlocke.storage import NuzlockeStore
-from pokemon_ev_tracker.core.nuzlocke.wipe_detection import PartyWipeCandidate, PartyWipeObserver
+from pokemon_ev_tracker.core.nuzlocke.wipe_detection import PartyWipeCandidate
 from pokemon_ev_tracker.core.pc_discovery_status import pc_discovery_failure_message
 from pokemon_ev_tracker.core.save_backups import SaveBackupService
 from pokemon_ev_tracker.data_sources.base import GameDataSource
@@ -63,16 +75,19 @@ from pokemon_ev_tracker.games.registry import (
     default_game_provider,
     get_game_provider,
 )
-from pokemon_ev_tracker.pokemon.gen4.structure import (
-    HELD_ITEM_BOX_DATA_OFFSET,
-    HELD_ITEM_RECORD_OFFSET,
-    IVS_BOX_DATA_OFFSET,
-    IVS_RECORD_OFFSET,
-)
 from pokemon_ev_tracker.transport.bizhawk_server import FriendshipWalkCommandReceipt
 from pokemon_ev_tracker.ui.app_shell import AppShell
 from pokemon_ev_tracker.ui.backend_status import BackendStatusWidget
+from pokemon_ev_tracker.ui.battle_recommendations import (
+    BattleRecommendationProjector,
+    TrainingMember,
+)
 from pokemon_ev_tracker.ui.compact_nuzlocke import CompactNuzlockeView
+from pokemon_ev_tracker.ui.diagnostic_health_presentation import format_pc_health
+from pokemon_ev_tracker.ui.diagnostics_presentation import (
+    RamBattleDiagnosticObservation,
+    format_ram_battle_diagnostics,
+)
 from pokemon_ev_tracker.ui.diagnostics_tools import build_advanced_diagnostics
 from pokemon_ev_tracker.ui.diagnostics_view import DiagnosticsView
 from pokemon_ev_tracker.ui.ev_change_log import EvChangeLogWidget
@@ -101,6 +116,13 @@ from pokemon_ev_tracker.ui.party_presentation import (
     apply_party_stats,
     project_moves_text,
     refresh_move_displays,
+)
+from pokemon_ev_tracker.ui.pc_inspection_presentation import format_pc_pokemon_inspection
+from pokemon_ev_tracker.ui.pokemon_diagnostics import (
+    PartyPokemonDiagnosticObservation,
+    format_boxed_change_diagnostics,
+    format_boxed_record_diagnostics,
+    format_party_pokemon_diagnostics,
 )
 from pokemon_ev_tracker.ui.preferences_view import DisconnectedView, PreferencesView
 from pokemon_ev_tracker.ui.sprite_loader import (
@@ -145,46 +167,6 @@ def _parse_optional_int(value) -> int | None:
         except ValueError:
             return None
     return None
-
-
-def _valid_acquisition_snapshot(party_state) -> bool:
-    if (
-        party_state is None
-        or not party_state.party_count_valid
-        or party_state.error
-        or getattr(party_state, "live_read_warning", None)
-        or party_state.party_count != len(party_state.pokemon)
-    ):
-        return False
-    return all(
-        pokemon.checksum_valid and not getattr(pokemon, "sample_stale", False)
-        for pokemon in party_state.pokemon
-    )
-
-
-def _valid_death_snapshot(party_state, party_payload, stale_after: float) -> bool:
-    if not _valid_acquisition_snapshot(party_state) or party_payload is None:
-        return False
-    received_at = getattr(party_payload, "received_at", None)
-    if not isinstance(received_at, (int, float)) or time.monotonic() - received_at > stale_after:
-        return False
-    return all(
-        getattr(pokemon, "current_stats", None) is not None
-        and isinstance(getattr(pokemon, "current_hp", None), int)
-        and not isinstance(getattr(pokemon, "current_hp", None), bool)
-        and isinstance(getattr(pokemon, "max_hp", None), int)
-        and 1 <= pokemon.max_hp <= 714
-        and 0 <= pokemon.current_hp <= pokemon.max_hp
-        for pokemon in party_state.pokemon
-    )
-
-
-def _frame_number(payload) -> int | None:
-    value = payload.get("frame") if isinstance(payload, dict) else None
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 class _ElidedStatusLabel(QLabel):
@@ -251,6 +233,8 @@ class MainWindow(QMainWindow):
         self._connection_notice = ""
         self._connection_notice_until = 0.0
         self.training_recommendations = {}
+        self._recommendation_projector = BattleRecommendationProjector()
+        self._training_projection = None
         self.nuzlocke_view = NuzlockeView(
             store=nuzlocke_store,
             profiles=((self.provider.nuzlocke_profile,)
@@ -297,10 +281,8 @@ class MainWindow(QMainWindow):
         self._last_pc_storage_discovery_text = "No PC storage discovery scan has been run."
         self._last_pc_storage_discovery_key = None
         self._last_pc_storage_scan_frame: int | None = None
-        self._party_hp_observer = PartyHpObserver()
-        self._party_wipe_observer = PartyWipeObserver()
+        self.party_lifecycle = PartyLifecycleCoordinator(self.provider, clock=lambda: time.monotonic())
         self._pending_wipe = None
-        self._no_run_prompt_observer = NoRunPromptObserver()
         self.compact_mode = False
         self.tracker_view = "training"
         self._compact_member_count = -1
@@ -551,7 +533,7 @@ class MainWindow(QMainWindow):
             self.friendship_walk_group.select_pokemon(
                 self.tracker_party_cards.get(slot, {}).get("pokemon"))
 
-    def _refresh_party_workspaces(self, connected=None) -> None:
+    def _refresh_party_workspaces(self, connected=None, *, refresh_recommendations=True) -> None:
         if connected is None:
             connected = self._training_party_connected
         for card in self.tracker_party_cards.values():
@@ -573,7 +555,8 @@ class MainWindow(QMainWindow):
         self.friendship_walk_group.refresh_party(self.tracker_party_cards)
         self.nuzlocke_view.set_party_cards(self.tracker_party_cards if connected else {})
         self._render_friendship_walk()
-        self._refresh_training_recommendations(() if not connected else None)
+        if refresh_recommendations:
+            self._refresh_training_recommendations(() if not connected else None)
 
     def _refresh_fight_summaries(self) -> None:
         timeline = self.nuzlocke_view.fight_timeline()
@@ -608,9 +591,7 @@ class MainWindow(QMainWindow):
                 return
         if not self.nuzlocke_view.end_run_wiped(candidate):
             return
-        self._party_hp_observer.reset()
-        self._party_wipe_observer.reset()
-        self._no_run_prompt_observer.suppress_for_session()
+        self.party_lifecycle.run_ended()
         box = QMessageBox(self)
         box.setWindowTitle("Run Ended")
         box.setText(f'"{run.name}" was marked WIPED. Start the next run?')
@@ -645,39 +626,33 @@ class MainWindow(QMainWindow):
             self.nuzlocke_view._create_run()
 
     def _refresh_training_recommendations(self, opponents=None) -> None:
-        if not (self.provider.capabilities.live_opponents and self.provider.capabilities.ev_yields):
+        available = self.provider.capabilities.live_opponents and self.provider.capabilities.ev_yields
+        if not available:
             self._training_opponent_yields = ()
-            self._training_battle_state = "unavailable"
-            self.training_recommendations = {}
-            self.recommendation_panel.refresh(
-                self.tracker_party_cards, {}, battle_state="unavailable")
-            self.compact_training_view.refresh_recommendations({}, battle_state="unavailable")
-            return
-        if opponents is not None:
-            yields = tuple(self.provider.get_training_ev_yield(enemy.species_id) for enemy in opponents)
-            self._training_opponent_yields = yields
-            self._training_battle_state = (
-                "unavailable" if any(value is None for value in yields) else
-                "active" if any(any(value.as_mapping().values()) for value in yields) else "idle"
-            )
-        self.training_recommendations = {
-            slot: recommend_battle_evs(card.get("training_preference"), self._training_opponent_yields)
+        elif opponents is not None:
+            self._training_opponent_yields = tuple(
+                self.provider.get_training_ev_yield(enemy.species_id) for enemy in opponents)
+        members = tuple(
+            TrainingMember(slot, pokemon.stable_id, card.get("training_preference"))
             for slot, card in self.tracker_party_cards.items()
-            if self._training_battle_state == "active"
-            and (pokemon := card.get("pokemon")) is not None
+            if (pokemon := card.get("pokemon")) is not None
             and pokemon.checksum_valid
-        }
+        )
+        projection = self._recommendation_projector.project(
+            members, self._training_opponent_yields, available=available, provider=self.provider)
+        self._training_battle_state = projection.battle_state
+        if projection is not self._training_projection:
+            self.training_recommendations = dict(projection.recommendations)
+            self._training_projection = projection
         self.recommendation_panel.refresh(
             self.tracker_party_cards, self.training_recommendations,
             battle_state=self._training_battle_state,
         )
         self.compact_training_view.refresh_recommendations(self.training_recommendations, battle_state=self._training_battle_state)
-        if self._training_opponent_yields and all(self._training_opponent_yields):
+        if projection.combined_yield:
             labels = dict(EV_STAT_LABELS)
-            combined = {key: sum(value.as_mapping()[key] for value in self._training_opponent_yields)
-                        for key in labels}
             self.current_opponent_panel.combined_yield.setText("Combined EV yield · " + " · ".join(
-                f"+{value} {labels[key]}" for key, value in combined.items() if value))
+                f"+{value} {labels[key]}" for key, value in projection.combined_yield if value))
         self.current_opponent_panel.combined_yield.setVisible(len(self._training_opponent_yields) > 1)
 
     def _toggle_training_stat(self, slot: int, stat: str) -> None:
@@ -1701,6 +1676,11 @@ class MainWindow(QMainWindow):
             self._pc_resolver_lifecycle = "cache-pending"
         else:
             self._pc_resolver_lifecycle = "unresolved"
+        pc_health = PCMonitoringHealth(
+            state=HealthState.UNKNOWN if self.provider.capabilities.pc_storage else HealthState.UNSUPPORTED,
+            phase=PCPhase.CONNECTING, layout_resolved=False, monitoring_active=False,
+            last_event="No PC events yet.",
+        )
         if self.provider.capabilities.pc_storage:
             self._refresh_pc_storage_debug(
                 pc_storage_state, pc_storage_payload, pc_storage_fresh,
@@ -1708,65 +1688,25 @@ class MainWindow(QMainWindow):
                 pc_storage_discovery_progress, pc_storage_monitor_debug,
                 pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
             )
-            self._refresh_pc_storage_compact_status(
+            pc_health = self._refresh_pc_storage_compact_status(
                 snapshot.connected, pc_storage_state, pc_payload_data,
                 pc_storage_discovery_payload, pc_storage_discovery_progress,
                 pc_storage_monitor_debug,
                 pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
             )
-        payload_data = party_payload.payload if party_payload is not None else {}
         stale_after = getattr(
             getattr(self.ram_data_source, "server", None), "stale_after_seconds", 5.0
         )
-        valid_death_snapshot = _valid_death_snapshot(party_state, party_payload, stale_after)
-        hp_samples = tuple(
-            PartyHpSample(
-                stable_id=pokemon.stable_id,
-                species=pokemon.species,
-                nickname=(self.provider.party_acquisition_candidate(pokemon).nickname
-                          if self.provider.capabilities.nuzlocke else pokemon.nickname),
-                level=pokemon.level,
-                current_hp=pokemon.current_hp,
-                met_location_id=pokemon.met_location_id,
-                met_location_name=pokemon.met_location_name,
-                met_level=pokemon.met_level,
-                origin_game=pokemon.origin_game,
-            )
-            for pokemon in getattr(party_state, "pokemon", ())
-        )
-        stream_identity = tuple(
-            payload_data.get(key) for key in ("run_id", "core", "domain", "pointer_value")
-        )
-        frame = _frame_number(payload_data)
-        death_candidates = self._party_hp_observer.observe(
-            hp_samples,
-            connected=snapshot.connected,
-            valid_snapshot=valid_death_snapshot,
+        self.party_lifecycle.process(
+            party_state, party_payload, connected=snapshot.connected,
             run_id=acquisition_run.run_id if acquisition_run else None,
-            stream_identity=stream_identity,
-            frame=frame,
+            stale_after=stale_after,
+            prompt_enabled=(self.settings.prompt_for_nuzlocke_run
+                            and self.provider.capabilities.nuzlocke),
+            on_deaths=self.nuzlocke_view.receive_ram_death_candidates,
+            on_wipe=self._handle_party_wipe,
+            on_no_run=self._prompt_create_run_without_active,
         )
-        if death_candidates:
-            self.nuzlocke_view.receive_ram_death_candidates(
-                acquisition_run.run_id if acquisition_run else None,
-                death_candidates,
-            )
-        wipe = self._party_wipe_observer.observe(
-            hp_samples, connected=snapshot.connected,
-            valid_snapshot=valid_death_snapshot,
-            run_id=acquisition_run.run_id if acquisition_run else None,
-            stream_identity=stream_identity, frame=frame,
-        )
-        if wipe:
-            self._handle_party_wipe(wipe)
-        if self._no_run_prompt_observer.observe(
-            connected=snapshot.connected, valid_snapshot=valid_death_snapshot,
-            party_size=len(hp_samples), active_run=acquisition_run is not None,
-            stream_identity=stream_identity, frame=frame,
-            enabled=(self.settings.prompt_for_nuzlocke_run
-                     and self.provider.capabilities.nuzlocke),
-        ):
-            self._prompt_create_run_without_active()
         age = max(0.0, time.monotonic() - heartbeat.received_at) if heartbeat else None
         self.backend_status.set_connection(
             snapshot.backend_name, snapshot.connected, heartbeat, age
@@ -1783,7 +1723,7 @@ class MainWindow(QMainWindow):
             acquisition_run,
             ram_fresh=snapshot.details.get("party_payload_fresh", False),
         )
-        self._refresh_tracker_party(snapshot.connected, display_party_state)
+        self._refresh_tracker_party(snapshot.connected, display_party_state, refresh_recommendations=False)
         nuzlocke_members = ()
         if (
             snapshot.connected
@@ -1814,31 +1754,24 @@ class MainWindow(QMainWindow):
         if self.provider.capabilities.friendship_walk:
             self._refresh_friendship_walk(snapshot, party_payload, active_enemies)
         self._refresh_training_recommendations(active_enemies if snapshot.connected else ())
-        self.diagnostics_view.refresh(snapshot, {
-            "game_name": self.profile.display_name,
-            "command_state": self._walk_command_state,
-            "pc_status": self.pc_storage_status_label.text(),
-            "pc_layout": self.pc_storage_layout_label.text(),
-            "boxed_count": self.pc_storage_occupied_label.text(),
-            "acquisition_status": self.pc_storage_catch_status_label.text(),
-            "pc_event": self.pc_storage_last_event_label.text(),
-            "recovery_message": self.pc_storage_recovery_label.text(),
-            "rediscover_enabled": self.pc_discover_current_layout_button.isEnabled(),
-        })
-        self.nuzlocke_view.set_pc_monitor_status(
-            self.pc_storage_status_label.text() + "\n" + self.pc_storage_layout_label.text()
-            + "\n" + self.pc_storage_occupied_label.text())
+        health = observe_diagnostic_health(
+            snapshot, game_name=self.profile.display_name, pc=pc_health,
+            command=observe_command_channel(self._walk_command_state,
+                supported=self.provider.capabilities.friendship_walk),
+            live_party_supported=self.provider.capabilities.live_party, now=time.monotonic(),
+        )
+        self.diagnostics_view.refresh_health(health)
+        pc_text = format_pc_health(pc_health)
+        self.nuzlocke_view.set_pc_monitor_status(pc_text.summary)
         self.shell.system_label.setText(
             "EMULATOR LINK\n\n" + ("Connected" if snapshot.connected else "Disconnected")
-            + "\nCommands · " + self._walk_command_state
-            + "\n" + self.pc_storage_status_label.text())
-        self.compact_nuzlocke_view.rediscover_button.setEnabled(
-            self.pc_discover_current_layout_button.isEnabled())
+            + "\nCommands · " + self._walk_command_state + "\nStatus: " + pc_text.status)
+        self.compact_nuzlocke_view.rediscover_button.setEnabled(pc_health.rediscover_enabled)
         refresh_event_notices(self)
         if snapshot.connected:
             self._record_ev_changes(party_state)
 
-    def _refresh_tracker_party(self, connected: bool, party_state) -> None:
+    def _refresh_tracker_party(self, connected: bool, party_state, *, refresh_recommendations=True) -> None:
         self._training_party_connected = connected
         members = ()
         if (
@@ -1882,7 +1815,7 @@ class MainWindow(QMainWindow):
             info=info,
         )
         if message is not None:
-            self._refresh_party_workspaces(connected)
+            self._refresh_party_workspaces(connected, refresh_recommendations=refresh_recommendations)
             return
 
         for pokemon in members:
@@ -1917,7 +1850,7 @@ class MainWindow(QMainWindow):
             card["total"].setText(f"Total EVs: {total if total is not None else '--'} / 510")
             card["total_bar"].setValue(max(0, min(510, total)) if total is not None else 0)
             card["widget"].show()
-        self._refresh_party_workspaces(connected)
+        self._refresh_party_workspaces(connected, refresh_recommendations=refresh_recommendations)
 
     def _set_bottom_status(
         self,
@@ -2432,82 +2365,14 @@ class MainWindow(QMainWindow):
             position = self.provider.decode_player_position(payload)
             walk_controller = getattr(self, "friendship_walk", None)
             walk_moves = getattr(walk_controller, "successful_moves", 0)
-            lines.extend(
-                (
-                    f"Source: {party_payload.source}",
-                    *self._friendship_walk_transport_debug_lines(party_payload, ram_fresh),
-                    f"Frame: {payload.get('frame', '--')}",
-                    f"Domain: {payload.get('domain', '--')}",
-                    f"Player X: {position.x if position else '--'}",
-                    f"Player Y: {position.y if position else '--'}",
-                    f"Delta X: {position.delta_x if position and position.delta_x is not None else '--'}",
-                    f"Delta Y: {position.delta_y if position and position.delta_y is not None else '--'}",
-                    f"Coordinate offsets: {payload.get('player_x_offset', '--')} / {payload.get('player_y_offset', '--')} (signed 16-bit LE; validated)",
-                    (
-                        f"Friendship Walk: {payload.get('friendship_walk_status', 'Idle')}; "
-                        f"successful moves this session: {walk_moves}"
-                    ),
-                    f"Pointer address: {payload.get('pointer_address', '--')}",
-                    f"Pointer offset: {payload.get('pointer_offset', '--')}",
-                    f"Pointer value: {payload.get('pointer_value', '--')}",
-                    f"Party relative offset: {payload.get('party_relative_offset', '--')}",
-                    f"Party address: {payload.get('party_address', '--')}",
-                    f"Party offset: {payload.get('party_offset', '--')}",
-                    f"Party records address: {payload.get('party_records_address', '--')}",
-                    f"Party records offset: {payload.get('party_records_offset', '--')}",
-                    "Offset candidates:",
-                    *(f"  {candidate}" for candidate in payload.get("party_offset_candidates", [])),
-                    "",
-                )
+            lines.append(f"Source: {party_payload.source}")
+            lines.extend(self._friendship_walk_transport_debug_lines(party_payload, ram_fresh))
+            observation = RamBattleDiagnosticObservation(
+                payload=payload, position=position, walk_moves=walk_moves,
+                battlers=tuple(battle_battlers), active_enemies=tuple(active_enemies),
+                enemy_yields=tuple(self.provider.format_ev_yield(enemy.species_id) for enemy in active_enemies),
             )
-            lines.append("Battle Battlers (candidate offsets/fields; validate in gameplay):")
-            lines.append(f"Base pointer: {payload.get('pointer_value', '--')}")
-            for battler in battle_battlers:
-                species_id = battler.species_id if battler.species_id is not None else "--"
-                level = battler.level if battler.level is not None else "--"
-                hp = (
-                    f"{battler.current_hp} / {battler.max_hp or '?'}"
-                    if battler.current_hp is not None
-                    else "-- / ?"
-                )
-                stats = ", ".join(
-                    f"{name}={value if value is not None else '--'}"
-                    for name, value in battler.stats.items()
-                )
-                lines.extend(
-                    (
-                        f"Battler {battler.battler_index} - {battler.role}",
-                        f"Relative offset: 0x{battler.relative_offset:05X}",
-                        f"Record address: {_format_optional_hex(battler.address)}",
-                        f"Species ID: {species_id}; species: {battler.species}",
-                        f"Level: {level}; current HP (diagnostic): {hp}",
-                        f"Max HP candidate at +0x4E (diagnostic): {battler.max_hp}",
-                        f"HP region raw (+0x48..+0x53): {battler.hp_region_raw_hex or '--'}",
-                        f"Candidate stats: {stats}",
-                        f"Candidate PID: {_format_optional_hex(battler.pid)}",
-                        (
-                            f"Candidate ability ID: {battler.ability_id if battler.ability_id is not None else '--'}; "
-                            f"candidate held item ID: {battler.held_item_id if battler.held_item_id is not None else '--'}"
-                        ),
-                        f"Candidate nickname bytes: {battler.nickname_raw_hex or '--'}",
-                        f"Validation state: {battler.validation_state.value}"
-                        + (f" ({battler.validation_reason})" if battler.validation_reason else ""),
-                        f"Raw record: {battler.raw_hex or '--'}",
-                        "",
-                    )
-                )
-            lines.append("Currently Battling:")
-            if active_enemies:
-                for battler in active_enemies:
-                    lines.append(
-                        f"Enemy {1 if battler.battler_index == 1 else 2}: "
-                        f"{battler.species}, Lv. {battler.level}, HP "
-                        f"{battler.current_hp} / {battler.max_hp or '?'}; "
-                        f"Base EV Yield: {self.provider.format_ev_yield(battler.species_id)}"
-                    )
-            else:
-                lines.append("No validated active enemy battlers.")
-            lines.append("")
+            lines.extend(format_ram_battle_diagnostics(observation))
         if party_state.error:
             lines.append(
                 f"{'Note' if party_state.party_count_valid else 'Error'}: {party_state.error}"
@@ -2515,9 +2380,6 @@ class MainWindow(QMainWindow):
         if party_state.candidate_count:
             lines.append(f"Scanned non-empty candidates: {party_state.candidate_count}")
         for pokemon in party_state.pokemon:
-            diag = pokemon.decoded.diagnostics
-            nickname = pokemon.decoded.nickname_diagnostics
-            acquisition = pokemon.decoded.acquisition_metadata_diagnostics
             candidate = self.provider.party_acquisition_candidate(pokemon)
             source, confidence, suggested_id = (
                 self.provider.classify_acquisition(candidate, acquisition_run)
@@ -2555,138 +2417,15 @@ class MainWindow(QMainWindow):
                 if acquisition_run
                 else False
             )
-            terminator = nickname.terminator_unit_index
-            terminator_label = (
-                f"unit {terminator} (field byte +0x{terminator * 2:02X})"
-                if terminator is not None
-                else "not present; decoded to field end"
+            observation = PartyPokemonDiagnosticObservation(
+                acquisition_source=source, acquisition_confidence=confidence,
+                suggested_id=suggested_id, suggested_name=suggested_name,
+                already_observed=already_observed,
+                item_slug=item_sprite_slug(pokemon.held_item_name),
+                item_path=item_sprite_path(pokemon.held_item_name),
+                item_exists=item_sprite_exists(pokemon.held_item_name),
             )
-            lines.extend(
-                (
-                    f"Slot {pokemon.slot} - {pokemon.species}",
-                    f"Address: {_format_optional_hex(diag.address)}",
-                    f"PID: 0x{diag.pid:08X}",
-                    f"Stable Pokémon ID: {pokemon.stable_id}",
-                    (
-                        f"Checksum: {'VALID' if pokemon.checksum_valid else 'INVALID'} "
-                        f"(stored 0x{diag.checksum:04X}, calculated 0x{diag.calculated_checksum:04X})"
-                    ),
-                    f"Permutation: {diag.block_order} (index {diag.shuffle_index})",
-                    f"Species ID: {pokemon.species_id}",
-                    f"Nature ID: {pokemon.nature_id}",
-                    f"Nature: {pokemon.nature_name}",
-                    f"Friendship: {pokemon.friendship}",
-                    f"Nature increased stat: {pokemon.nature_increased_stat or '--'}",
-                    f"Nature decreased stat: {pokemon.nature_decreased_stat or '--'}",
-                    f"Ability slot: {pokemon.ability_slot or '--'}",
-                    f"Ability ID: {pokemon.ability_id}",
-                    f"Ability name: {pokemon.ability_name or '--'}",
-                    "IVs:",
-                    f"  HP: {pokemon.hp_iv}",
-                    f"  Attack: {pokemon.attack_iv}",
-                    f"  Defense: {pokemon.defense_iv}",
-                    f"  Sp. Atk: {pokemon.special_attack_iv}",
-                    f"  Sp. Def: {pokemon.special_defense_iv}",
-                    f"  Speed: {pokemon.speed_iv}",
-                    (
-                        "IV packed word: "
-                        f"0x{pokemon.decoded.packed_ivs:08X} "
-                        f"(record +0x{IVS_RECORD_OFFSET:02X}, "
-                        f"decrypted box data +0x{IVS_BOX_DATA_OFFSET:02X})"
-                    ),
-                    (
-                        "IV packed flags: "
-                        f"egg={str(pokemon.decoded.ivs.is_egg).lower()}, "
-                        f"has_nickname={str(pokemon.decoded.ivs.has_nickname).lower()}"
-                    ),
-                    f"Held item ID: {pokemon.held_item_id}",
-                    f"Held item name: {pokemon.held_item_name or 'None'}",
-                    f"Held item sprite slug: {item_sprite_slug(pokemon.held_item_name) or '--'}",
-                    f"Held item sprite path: {item_sprite_path(pokemon.held_item_name) or '--'}",
-                    f"Held item sprite exists: {str(item_sprite_exists(pokemon.held_item_name)).lower()}",
-                    f"Held item decrypted box-data offset: 0x{HELD_ITEM_BOX_DATA_OFFSET:02X}",
-                    f"Held item party-record layout offset: 0x{HELD_ITEM_RECORD_OFFSET:02X}",
-                    f"Nickname absolute address: {_format_optional_hex(nickname.absolute_address)}",
-                    f"Nickname record-relative offset: 0x{nickname.record_relative_offset:02X}",
-                    f"Nickname decrypted box-data offset: 0x{nickname.box_data_relative_offset:02X}",
-                    f"Nickname raw bytes: {nickname.raw_bytes_hex}",
-                    f"Nickname code units: {[f'0x{unit:04X}' for unit in nickname.code_units]}",
-                    f"Nickname terminator: {terminator_label}",
-                    f"Nickname decoded string: {nickname.decoded_string!r}",
-                    f"Nickname final: {pokemon.nickname!r}",
-                    (
-                        f"Met location: ID {pokemon.met_location_id} "
-                        f"({pokemon.met_location_name or 'Unknown'})"
-                    ),
-                    (
-                        f"Met location extended offsets: record +0x{acquisition.met_location_record_offset:02X}, "
-                        f"decrypted box +0x{acquisition.met_location_box_data_offset:02X}, "
-                        f"absolute {_format_optional_hex(diag.address + acquisition.met_location_record_offset if diag.address is not None else None)}; "
-                        f"decrypted field bytes {pokemon.met_location_id.to_bytes(2, 'little').hex(' ').upper()}"
-                    ),
-                    (
-                        f"Met location DP-style ID: {pokemon.decoded.met_location_dp_id} "
-                        f"(record +0x{acquisition.met_location_dp_record_offset:02X}, "
-                        f"decrypted box +0x{acquisition.met_location_dp_box_data_offset:02X})"
-                    ),
-                    (
-                        f"Met level: {pokemon.met_level if pokemon.met_level is not None else '--'} "
-                        f"(record +0x{acquisition.met_level_record_offset:02X}, "
-                        f"decrypted box +0x{acquisition.met_level_box_data_offset:02X}, "
-                        f"raw 0x{pokemon.decoded.met_level or 0:02X})"
-                    ),
-                    (
-                        f"Egg location ID: {pokemon.egg_location_id} "
-                        f"(record +0x{acquisition.egg_location_record_offset:02X}, "
-                        f"decrypted box +0x{acquisition.egg_location_box_data_offset:02X}, "
-                        f"raw {pokemon.egg_location_id.to_bytes(2, 'little').hex(' ').upper()})"
-                    ),
-                    (
-                        f"Origin game ID: {pokemon.origin_game} "
-                        f"(record +0x{acquisition.origin_game_record_offset:02X}, "
-                        f"decrypted box +0x{acquisition.origin_game_box_data_offset:02X}, "
-                        f"raw 0x{pokemon.origin_game:02X})"
-                    ),
-                    (
-                        f"Met date (YY/MM/DD): {pokemon.met_date or '--'} "
-                        f"(record +0x{acquisition.met_date_record_offset:02X}, "
-                        f"decrypted box +0x{acquisition.met_date_box_data_offset:02X})"
-                    ),
-                    f"Is egg: {str(pokemon.is_egg).lower()}",
-                    f"Acquisition classification: {source} ({confidence.lower()} confidence)",
-                    f"Already observed in active run: {str(already_observed).lower()}",
-                    (
-                        f"Suggested Nuzlocke location: {suggested_name or '--'}"
-                        + (f" ({suggested_id})" if suggested_id else "")
-                    ),
-                    f"Level: {pokemon.level if pokemon.level is not None else '--'}",
-                    (
-                        f"Current HP: {pokemon.current_hp if pokemon.current_hp is not None else '--'} / "
-                        f"{pokemon.max_hp if pokemon.max_hp is not None else '--'}"
-                    ),
-                    "Current stats from party tail:",
-                    f"  Max HP: {pokemon.decoded.current_stats.max_hp}",
-                    f"  Attack: {pokemon.decoded.current_stats.attack}",
-                    f"  Defense: {pokemon.decoded.current_stats.defense}",
-                    f"  Sp. Atk: {pokemon.decoded.current_stats.special_attack}",
-                    f"  Sp. Def: {pokemon.decoded.current_stats.special_defense}",
-                    f"  Speed: {pokemon.decoded.current_stats.speed}",
-                    f"Battle stats raw (0x88-0x9B): {diag.battle_stats_raw_hex}",
-                    f"Battle stats decrypted (0x88-0x9B): {diag.battle_stats_decrypted_hex}",
-                    f"Battle stats valid: {str(diag.battle_stats_valid).lower()}",
-                    f"Battle stats validation: {diag.battle_stats_error or 'OK'}",
-                )
-            )
-            if pokemon.checksum_valid:
-                lines.extend(
-                    (
-                        *(f"{stat}: {value}" for stat, value in pokemon.evs.items()),
-                        f"Total EVs: {pokemon.ev_total}",
-                        "",
-                    )
-                )
-            else:
-                lines.extend(("EVs withheld because checksum is invalid", ""))
+            lines.extend(format_party_pokemon_diagnostics(pokemon, observation))
         if not party_state.pokemon and not party_state.error:
             lines.append("No occupied party slots reported.")
         text = "\n".join(lines)
@@ -3473,13 +3212,15 @@ class MainWindow(QMainWindow):
     def _refresh_pc_storage_compact_status(
         self, connected, state, pc_payload, discovery_payload, progress,
         monitor_debug, acquisition_trace,
-    ) -> None:
+    ) -> PCMonitoringHealth:
         discovery = getattr(discovery_payload, "payload", {})
         if not isinstance(discovery, dict):
             discovery = {}
         if not isinstance(progress, dict):
             progress = {}
         discovery_summary = discovery.get("pc_storage_discovery_summary") or {}
+        if not isinstance(discovery_summary, dict):
+            discovery_summary = {}
         failure = progress.get("status") == "failed" or self._pc_resolver_lifecycle in {
             "cache-confirmation-failed", "discovery-failed",
         }
@@ -3489,56 +3230,64 @@ class MainWindow(QMainWindow):
         )
         self.pc_storage_anchor_recovery.setVisible(anchor_failure)
         if anchor_failure:
-            self.pc_storage_recovery_label.setText(pc_discovery_failure_message(
-                discovery_summary, session_layout=True,
-            ))
+            recovery_message = pc_discovery_failure_message(discovery_summary, session_layout=True)
         elif failure:
-            self.pc_storage_recovery_label.setText(pc_discovery_failure_message({
+            recovery_message = pc_discovery_failure_message({
                 **discovery_summary,
                 "resolver_error": discovery.get("pc_storage_resolver_error") or progress.get("error"),
-            }))
+            })
         else:
-            self.pc_storage_recovery_label.setText("")
+            recovery_message = ""
         if not connected or not pc_payload:
-            status = "Connecting"
+            phase = PCPhase.CONNECTING
         elif self._pc_monitoring_ready:
-            status = "Monitoring"
+            phase = PCPhase.MONITORING
         elif self._pc_resolver_lifecycle == "cache-pending":
-            status = "Validating PC layout"
+            phase = PCPhase.VALIDATING
         elif self._pc_resolver_lifecycle == "resolved-awaiting-baseline":
-            status = "Establishing baseline"
+            phase = PCPhase.BASELINE
         elif self._pc_resolver_lifecycle == "discovering":
-            status = "Discovering PC layout"
+            phase = PCPhase.DISCOVERING
         elif failure:
-            status = "Monitoring paused"
+            phase = PCPhase.PAUSED
         elif self._pc_resolver_lifecycle == "stale":
-            status = "Rediscovery required"
+            phase = PCPhase.REDISCOVERY
         else:
-            status = "Monitoring paused"
-        self.pc_storage_status_label.setText(f"Status: {status}")
-        self.pc_discover_current_layout_button.setEnabled(
-            status not in {"Discovering PC layout", "Validating PC layout"}
-        )
+            phase = PCPhase.PAUSED
+        pc_state = (HealthState.UNHEALTHY if not connected else
+            HealthState.UNKNOWN if not pc_payload else HealthState.HEALTHY if phase is PCPhase.MONITORING else
+            HealthState.UNHEALTHY if failure else HealthState.STALE if phase is PCPhase.REDISCOVERY else
+            HealthState.UNKNOWN if phase in {PCPhase.VALIDATING, PCPhase.BASELINE, PCPhase.DISCOVERING} else HealthState.UNHEALTHY)
         layout_resolved = (
             pc_payload.get("pc_storage_resolver_status") == "resolved for this session"
+            and isinstance(self._pc_lua_run_id, str) and bool(self._pc_lua_run_id)
             and pc_payload.get("session_pc_run_id") == self._pc_lua_run_id
         )
-        self.pc_storage_layout_label.setText(
-            "Box layout: Resolved" if layout_resolved else "Box layout: Unresolved"
+        health = PCMonitoringHealth(
+            state=pc_state, phase=phase, layout_resolved=layout_resolved,
+            monitoring_active=self._pc_monitoring_ready,
+            boxed_count=len(state.valid_pokemon) if state is not None and state.available else None,
+            discovery_state=HealthState.UNHEALTHY if failure else HealthState.HEALTHY
+                if progress.get("status") == "completed" else HealthState.UNKNOWN,
+            session_id=self._pc_lua_run_id,
+            layout_session_id=pc_payload.get("session_pc_run_id")
+                if isinstance(pc_payload.get("session_pc_run_id"), str) else None,
+            recovery_message=recovery_message, last_event=self._pc_last_event,
+            rediscover_enabled=phase not in {PCPhase.DISCOVERING, PCPhase.VALIDATING},
         )
-        self.pc_storage_occupied_label.setText(
-            f"Boxed Pokemon: {len(state.valid_pokemon)}"
-            if state is not None and state.available else "Boxed Pokemon: --"
-        )
-        self.pc_storage_catch_status_label.setText(
-            f"Monitoring new catches: {'Yes' if self._pc_monitoring_ready else 'No'}"
-        )
+        text = format_pc_health(health)
+        self.pc_storage_recovery_label.setText(health.recovery_message)
+        self.pc_storage_status_label.setText(f"Status: {text.status}")
+        self.pc_discover_current_layout_button.setEnabled(health.rediscover_enabled)
+        self.pc_storage_layout_label.setText(f"Box layout: {text.layout}")
+        self.pc_storage_occupied_label.setText(f"Boxed Pokemon: {text.boxed}")
+        self.pc_storage_catch_status_label.setText(f"Monitoring new catches: {text.acquisition}")
         self.pc_storage_progress_label.setText(
-            f"Progress: {progress.get('progress_percent', 0)}%"
-            if status == "Discovering PC layout" else ""
-        )
-        self.pc_storage_last_event_label.setText(f"Last PC event: {self._pc_last_event}")
+            f"Progress: {progress.get('progress_percent', 0)}%" if phase is PCPhase.DISCOVERING else "")
+        self.pc_storage_last_event_label.setText(f"Last PC event: {health.last_event}")
         cache_install = progress.get("cache_install") or {}
+        if not isinstance(cache_install, dict):
+            cache_install = {}
         expected_name = self.pc_layout_species_combo.currentText()
         expected_nickname = self.pc_layout_nickname_edit.text().strip() or "(any nickname)"
         trace = acquisition_trace if isinstance(acquisition_trace, dict) else {}
@@ -3562,6 +3311,7 @@ class MainWindow(QMainWindow):
         self.pc_storage_retry_cache_button.setVisible(
             self._pc_resolver_lifecycle == "cache-confirmation-failed"
         )
+        return health
 
     def _discover_current_pc_layout(self) -> bool:
         species_id = self.pc_layout_species_combo.currentData()
@@ -4175,46 +3925,14 @@ class MainWindow(QMainWindow):
         if changes:
             lines.extend(("", "PC Storage Changes (RAM diff; before Nuzlocke processing):"))
             for mon in changes:
-                decoded = mon.decoded
-                location = mon.met_location_name or f"Unknown #{decoded.met_location_id}"
-                lines.extend(
-                    (
-                        f"NEW: Box {mon.box_index} Slot {mon.slot_index}",
-                        f"Species: {mon.species_name}; nickname: {decoded.nickname or mon.species_name}",
-                        (
-                            f"PID: 0x{decoded.pid:08X}; checksum: "
-                            f"{'VALID' if decoded.checksum_valid else 'INVALID'}"
-                        ),
-                        (
-                            f"Met location: {location} (ID {decoded.met_location_id}); "
-                            f"met level: {decoded.met_level if decoded.met_level is not None else '--'}"
-                        ),
-                    )
-                )
+                lines.extend(format_boxed_change_diagnostics(mon))
         if state is not None and state.records:
             lines.extend(("", "Non-empty box records:"))
             for mon in state.records:
-                decoded = mon.decoded
                 record_address = records_address + (
                     (mon.box_index - 1) * self.provider.pc_storage.slots_per_box + mon.slot_index - 1
                 ) * self.provider.pc_storage.box_pokemon_size
-                location = mon.met_location_name or f"Unknown #{decoded.met_location_id}"
-                lines.extend(
-                    (
-                        f"Box {mon.box_index} Slot {mon.slot_index}",
-                        f"  Address: {_format_optional_hex(record_address)}",
-                        f"  Species: {mon.species_name} (#{decoded.species_id})",
-                        f"  Nickname: {decoded.nickname or mon.species_name}",
-                        f"  PID: 0x{decoded.pid:08X}",
-                        (
-                            f"  Checksum: {'VALID' if decoded.checksum_valid else 'INVALID'} "
-                            f"(stored 0x{decoded.checksum:04X}, calculated 0x{decoded.calculated_checksum:04X})"
-                        ),
-                        f"  Met location: {location} (ID {decoded.met_location_id})",
-                        f"  Met level: {decoded.met_level if decoded.met_level is not None else '--'}",
-                        f"  Raw 136-byte record: {getattr(mon, 'raw_hex', '') or '--'}",
-                    )
-                )
+                lines.extend(format_boxed_record_diagnostics(mon, record_address))
         elif state is not None and state.available:
             lines.extend(("", "No non-empty PC BoxPokemon records were reported by the Lua scan."))
         lines.append("")
@@ -4720,191 +4438,7 @@ class MainWindow(QMainWindow):
         return lines
 
     def _pc_pokemon_inspection_lines(self, payload: dict) -> list[str]:
-        lines = ["", "Pokemon Anchor Inspection:"]
-        anchor = payload.get("pc_storage_inspection_anchor_address", "--")
-        record = payload.get("pc_storage_inspection_anchor_record")
-        if isinstance(record, dict):
-            species_id = _parse_optional_int(record.get("species_id"))
-            species_name = self.provider.species_names().get(
-                species_id, f"Unknown #{species_id if species_id is not None else '--'}"
-            )
-            lines.append(
-                f"  Anchor {anchor}: checksum-valid {record.get('nickname') or species_name} "
-                f"({species_name}, #{species_id if species_id is not None else '--'}); "
-                f"party overlap={record.get('party_overlap', '--')}; "
-                f"PID={record.get('pid', '--')}; stable ID={record.get('stable_id', '--')}"
-            )
-        else:
-            lines.append(
-                f"  No checksum-valid Pokemon record starts exactly at {anchor}; "
-                "the Main RAM identity search still ran."
-            )
-
-        nearby = payload.get("pc_storage_inspection_nearby_records")
-        if isinstance(nearby, list):
-            lines.extend(("  Nearby checksum-valid records (4-byte start alignment):",))
-            names = self.provider.species_names()
-            for item in nearby:
-                if not isinstance(item, dict):
-                    continue
-                species_id = _parse_optional_int(item.get("species_id"))
-                species_name = names.get(
-                    species_id, f"Unknown #{species_id if species_id is not None else '--'}"
-                )
-                lines.append(
-                    f"    {item.get('address', '--')} delta={item.get('delta_hex', '--')}: "
-                    f"{item.get('nickname') or species_name}/{species_name} "
-                    f"(#{species_id if species_id is not None else '--'}), "
-                    f"checksum={item.get('checksum_valid', False)}, "
-                    f"party overlap={item.get('party_overlap', '--')}, "
-                    f"delta%136={item.get('delta_multiple_of_136', False)}, "
-                    f"delta%236={item.get('delta_multiple_of_236', False)}"
-                )
-
-        spacing = payload.get("pc_storage_inspection_spacing_summary")
-        if isinstance(spacing, dict):
-            lines.append(
-                "  Repeated spacing: "
-                f"adjacent pairs={spacing.get('adjacent_record_pairs', 0)}, "
-                f"multiples of 136={spacing.get('pairs_multiple_of_136', 0)}, "
-                f"multiples of 236={spacing.get('pairs_multiple_of_236', 0)}"
-            )
-            for item in spacing.get("repeated_neighbor_spacings", [])[:16]:
-                lines.append(
-                    f"    {item.get('delta_bytes', '--')} bytes apart "
-                    f"({item.get('occurrences', 0)} adjacent pairs)"
-                )
-
-        copies = payload.get("pc_storage_discovery_identity_matches")
-        lines.append("  Copies matching the inspected Pokemon identity:")
-        if isinstance(copies, list) and copies:
-            names = self.provider.species_names()
-            for item in copies:
-                if not isinstance(item, dict):
-                    continue
-                species_id = _parse_optional_int(item.get("species_id"))
-                species_name = names.get(
-                    species_id, f"Unknown #{species_id if species_id is not None else '--'}"
-                )
-                lines.append(
-                    f"    {item.get('address', '--')} delta={item.get('delta_hex', '--')}: "
-                    f"{item.get('nickname') or '--'} / {species_name} "
-                    f"(#{species_id if species_id is not None else '--'}); "
-                    f"checksum={item.get('checksum_valid', False)}, "
-                    f"party overlap={item.get('party_overlap', '--')}, "
-                    f"same anchor identity={item.get('same_as_anchor_identity', '--')}"
-                )
-                for neighbor in item.get("surrounding_valid_pokemon", [])[:24]:
-                    neighbor_id = _parse_optional_int(neighbor.get("species_id"))
-                    neighbor_name = names.get(
-                        neighbor_id,
-                        f"Unknown #{neighbor_id if neighbor_id is not None else '--'}",
-                    )
-                    lines.append(
-                        f"      nearby {neighbor.get('address', '--')} "
-                        f"delta={neighbor.get('delta_hex', '--')}: "
-                        f"{neighbor.get('nickname') or neighbor_name}/{neighbor_name}; "
-                        f"party overlap={neighbor.get('party_overlap', '--')}"
-                    )
-                for reference in item.get("pointer_references", []):
-                    lines.append(
-                        f"      pointer {reference.get('reference_address', '--')} -> "
-                        f"{reference.get('target_address', '--')}"
-                    )
-        else:
-            lines.append("    No checksum-valid copies of the inspected identity were found.")
-
-        lines.append("  Direct pointers to supplied address and address - 4:")
-        anchor_references = payload.get("pc_storage_inspection_pointer_references")
-        if isinstance(anchor_references, list) and anchor_references:
-            for reference in anchor_references:
-                lines.append(
-                    f"    {reference.get('reference_address', '--')} -> "
-                    f"{reference.get('target_address', '--')} "
-                    f"({', '.join(reference.get('target', []))})"
-                )
-        else:
-            lines.append("    No direct 32-bit little-endian references found.")
-
-        lines.extend(("  Immediate bytes around the anchor:",))
-        adjacent_start = payload.get("pc_storage_inspection_adjacent_start", "--")
-        adjacent_hex = payload.get("pc_storage_inspection_adjacent_hex")
-        if isinstance(adjacent_hex, str):
-            try:
-                adjacent = bytes.fromhex(adjacent_hex)
-                start_address = _parse_optional_int(adjacent_start) or 0
-                for offset in range(0, len(adjacent), 16):
-                    lines.append(
-                        f"    0x{start_address + offset:08X}: "
-                        + adjacent[offset : offset + 16].hex(" ").upper()
-                    )
-            except ValueError:
-                lines.append("    Adjacent byte dump was malformed.")
-        for item in payload.get("pc_storage_inspection_adjacent_u32", []):
-            lines.append(
-                f"    u32 {item.get('relative_offset', '--')} "
-                f"{item.get('address', '--')} = {item.get('u32_le', '--')}"
-            )
-
-        comparison = payload.get("pc_storage_movement_comparison")
-        if isinstance(comparison, dict):
-            lines.extend(("  Movement experiment:", f"    Status: {comparison.get('status', '--')}"))
-            lines.append(f"    Stable ID: {comparison.get('stable_id') or '--'}")
-            if comparison.get("status") == "baseline captured":
-                lines.append(
-                    "    Baseline addresses: "
-                    + ", ".join(comparison.get("baseline_addresses", []))
-                )
-            else:
-                lines.append(
-                    "    Before: " + ", ".join(comparison.get("baseline_addresses", []))
-                )
-                lines.append(
-                    "    After: " + ", ".join(comparison.get("current_addresses", []))
-                )
-                for movement in comparison.get("movement_candidates", []):
-                    lines.append(
-                        f"    Move {movement.get('from_address', '--')} -> "
-                        f"{movement.get('to_address', '--')}: "
-                        f"{movement.get('delta_bytes', '--')} bytes "
-                        f"(136-stride={movement.get('delta_multiple_of_136', False)}, "
-                        f"236-stride={movement.get('delta_multiple_of_236', False)})"
-                    )
-                changes = comparison.get("changed_ram", {})
-                if isinstance(changes, dict):
-                    lines.append(
-                        f"    Changed RAM: {changes.get('changed_bytes', 0)} bytes in "
-                        f"{changes.get('changed_region_count', 0)} regions; "
-                        f"focus regions={changes.get('focus_region_count', 0)}"
-                    )
-                    for region in changes.get("focus_changed_regions", [])[:24]:
-                        lines.append(
-                            f"      {region.get('address_start', '--')}.."
-                            f"{region.get('address_end_exclusive', '--')}: "
-                            f"{region.get('changed_bytes', 0)} changed bytes"
-                        )
-
-        region_hex = payload.get("pc_storage_inspection_region_hex")
-        region_start = _parse_optional_int(
-            payload.get("pc_storage_inspection_region_start")
-        )
-        if isinstance(region_hex, str) and region_start is not None:
-            lines.append(
-                "  Raw anchor region "
-                f"{payload.get('pc_storage_inspection_region_start', '--')}.."
-                f"{payload.get('pc_storage_inspection_region_end_exclusive', '--')} "
-                f"({len(region_hex) // 2} bytes; 0x4000 before, 0x20000 after):"
-            )
-            try:
-                region = bytes.fromhex(region_hex)
-                for offset in range(0, len(region), 16):
-                    lines.append(
-                        f"    0x{region_start + offset:08X}: "
-                        + region[offset : offset + 16].hex(" ").upper()
-                    )
-            except ValueError:
-                lines.append("    Anchor region dump was malformed.")
-        return lines
+        return format_pc_pokemon_inspection(payload, self.provider.species_names())
 
     def _refresh_pc_storage_discovery_progress(self, progress) -> None:
         if not isinstance(progress, dict):

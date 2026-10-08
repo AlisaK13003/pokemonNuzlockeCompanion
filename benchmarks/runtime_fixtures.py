@@ -19,6 +19,7 @@ import time
 import tracemalloc
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -123,6 +124,80 @@ def measure_party_snapshots(server, payload, window=None):
     return result
 
 
+def measure_ui_orchestration(window, source):
+    """Active single/double battle calculations and the diagnostic text path."""
+    from pokemon_ev_tracker.core.ev_training import EVTrainingPreference
+    source.opponents(66, 74)
+    double = source.battlers
+    source.opponents(63)
+    single = source.battlers
+    source.battlers = double
+    for index, pokemon in enumerate(source.party.pokemon):
+        window.training_preference_store.set(pokemon.decoded.diagnostics.pid,
+            EVTrainingPreference(frozenset({"attack" if index % 2 else "defense"})))
+    window._refresh_ram_backend_debug()
+    result = {"active_unchanged_poll": measure(window._refresh_ram_backend_debug)}
+    profile = cProfile.Profile()
+    profile.enable()
+    for _ in range(30):
+        window._refresh_ram_backend_debug()
+    profile.disable()
+    result["calls_30_active_polls"] = {
+        name: sum(entry.callcount for entry in profile.getstats()
+                  if hasattr(entry.code, "co_name") and entry.code.co_name == name)
+        for name in ("_refresh_training_recommendations", "recommend_battle_evs",
+                     "_refresh_ram_party_debug")}
+    def changed_pair():
+        source.battlers = single
+        window._refresh_ram_backend_debug()
+        source.battlers = double
+        window._refresh_ram_backend_debug()
+    result["changed_opponent_pair"] = measure(changed_pair)
+    class TextSink:
+        def setText(self, text):
+            pass
+    class DiagnosticHarness:
+        _refresh_ram_party_debug = MainWindow._refresh_ram_party_debug
+        _friendship_walk_transport_debug_lines = MainWindow._friendship_walk_transport_debug_lines
+        provider = window.provider
+        ram_party_summary_label = TextSink()
+        def _set_ram_party_debug_text(self, text):
+            self.text = text
+    harness = DiagnosticHarness()
+    empty = SimpleNamespace(party_count=0, party_count_valid=True, error=None,
+                            candidate_count=0, pokemon=())
+    sample = SimpleNamespace(source="file", payload={"pointer_value": "0x022711C8",
+                                                    "frame": 123, "domain": "Main RAM"})
+    from pokemon_ev_tracker.games.platinum.battle import active_enemy_battlers
+    enemies = active_enemy_battlers(double)
+    result["diagnostic_text_formatting"] = measure(
+        lambda: harness._refresh_ram_party_debug(empty, sample, double, enemies))
+    result["diagnostic_text"] = harness.text
+    return result
+
+
+def measure_pokemon_diagnostics():
+    from test_pokemon_diagnostics import (
+        DiagnosticHarness,
+        box_cases,
+        fixed_item_assets,
+        inspection_cases,
+        party_cases,
+    )
+    harness = DiagnosticHarness()
+    party = party_cases()["valid"]
+    box = box_cases()["valid"]
+    state = SimpleNamespace(records=(box,), available=True, records_address=0x02280004,
+        valid_pokemon=(box,), empty_records=539, checksum_failures=0)
+    inspection = inspection_cases()["valid"]
+    slug, path, exists = fixed_item_assets()
+    with slug, path, exists:
+        result = {"party_diagnostic_refresh": measure(lambda: harness._refresh_ram_party_debug(party, None))}
+    result["boxed_diagnostic_refresh"] = measure(lambda: harness._pc_storage_debug_text(state, None, False, changes=(box,)))
+    result["anchor_inspection_formatting"] = measure(lambda: harness._pc_pokemon_inspection_lines(inspection))
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -172,6 +247,8 @@ def main():
                 payload = {"type": "party_memory", "raw_party_hex": raw.hex(),
                            "party_address": "0x0227E20C", "party_count": 6}
                 results["phase_b"] = measure_party_snapshots(server, payload, window)
+                results["phase_c1"] = measure_ui_orchestration(window, source)
+                results["phase_c2"] = measure_pokemon_diagnostics()
             finally:
                 window.close()
                 window.deleteLater()

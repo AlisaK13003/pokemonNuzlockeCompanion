@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PySide6.QtWidgets import QGridLayout, QLabel, QVBoxLayout, QWidget
 
+from pokemon_ev_tracker.core.diagnostic_health import finite_number
 from pokemon_ev_tracker.ui.theme import refresh_style
 
 
 class ConnectionBadge(QLabel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._display_connected = None
+        self._next_ms_update = 0.0
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
@@ -17,8 +25,8 @@ class ConnectionBadge(QLabel):
         painter.setPen(Qt.PenStyle.NoPen)
         connected = self.property("connectionState") == "connected"
         icon_only = bool(self.property("iconOnly"))
-        dot_x = self.width() / 2 if icon_only else 12 if connected else 18
-        text_x = 26 if connected else 32
+        dot_x = self.width() / 2 if icon_only else 18
+        text_x = 30 if connected else 32
         color = QColor("#57dda2" if self.property("connectionState") == "connected" else "#ff718b")
         center = self.height() / 2
         for radius, alpha in ((9, 12), (7, 25), (5, 45)):
@@ -34,26 +42,36 @@ class ConnectionBadge(QLabel):
         status_font = QFont(self.font())
         status_font.setItalic(False)
         status_font.setWeight(QFont.Weight.Bold)
+        if connected:
+            status_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.2)
         painter.setFont(status_font)
         painter.setPen(color)
         flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         painter.drawText(QRectF(text_x, 0, self.width()-text_x-12, self.height()), flags, status)
-        if not connected and not self.property("hideDetail"):
+        if not self.property("hideDetail"):
             status_width = QFontMetricsF(status_font, painter.device()).horizontalAdvance(status)
             divider = text_x + status_width + 10
-            painter.fillRect(QRectF(divider, center-7, 1, 14), QColor("#3c2b34"))
+            painter.fillRect(QRectF(divider, center-7, 1, 14), QColor("#284039" if connected else "#3c2b34"))
             detail_font = QFont(status_font)
             detail_font.setWeight(QFont.Weight.Normal)
+            detail_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0)
             painter.setFont(detail_font)
-            painter.setPen(QColor("#896371"))
+            painter.setPen(QColor("#85958d" if connected else "#896371"))
             painter.drawText(QRectF(divider+11, 0, self.width()-divider-23, self.height()),
-                             flags, "No heartbeat")
+                             flags, self._detail)
 
-    def set_status(self, connected):
+    def set_status(self, connected, age: float | None = None):
+        now = time.monotonic() if connected else 0.0
+        if connected == self._display_connected and (not connected or now < self._next_ms_update):
+            return
+        self._display_connected = connected
+        self._next_ms_update = now + 2.0
         # Paint both labels and their separator together so rich-text font metrics
         # cannot put the line inside the status label.
         self.setText("")
-        self.setAccessibleName("Live" if connected else "Offline · No heartbeat")
+        age = finite_number(age)
+        self._detail = (f"{round(max(0, age) * 1000)} ms" if age is not None else "-- ms") if connected else "No heartbeat"
+        self.setAccessibleName(f"Live · {self._detail}" if connected else "Offline · No heartbeat")
         self.update()
 
 
@@ -97,8 +115,9 @@ class BackendStatusWidget(QWidget):
     def set_connection(self, backend: str, connected: bool, heartbeat, age: float | None) -> None:
         status = "CONNECTED" if connected else "DISCONNECTED"
         state = "connected" if connected else "disconnected"
-        self.compact_label.set_status(connected)
-        self.compact_label.setToolTip(f"{backend} • {status}")
+        self.compact_label.set_status(connected, age)
+        detail = f"\nLast heartbeat: {age * 1000:.0f} ms ago" if connected and finite_number(age) is not None else ""
+        self.compact_label.setToolTip(f"{backend} • {status}{detail}")
         self.compact_label.setProperty("connectionState", state)
         refresh_style(self.compact_label)
         self.details["backend"].setText(backend)

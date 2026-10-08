@@ -28,6 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from pokemon_ev_tracker.core.diagnostic_health import DiagnosticHealthObservation
+from pokemon_ev_tracker.ui.diagnostic_health_compatibility import legacy_health_observation
+from pokemon_ev_tracker.ui.diagnostic_health_presentation import format_diagnostic_health
 from pokemon_ev_tracker.ui.party_selector import PokemonSprite
 from pokemon_ev_tracker.ui.theme import refresh_style
 from pokemon_ev_tracker.ui.training_panels import line_icon
@@ -50,18 +53,6 @@ def _panel() -> QFrame:
     panel.setMinimumWidth(0)
     panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     return panel
-
-
-def _payload(wrapper) -> Mapping:
-    value = getattr(wrapper, "payload", {})
-    return value if isinstance(value, Mapping) else {}
-
-
-def _without_prefix(value, prefix: str, fallback: str = "Unavailable") -> str:
-    text = str(value).strip() if value is not None else ""
-    if text.lower().startswith(prefix.lower()):
-        text = text[len(prefix):].strip()
-    return text or fallback
 
 
 def _status(label: QLabel, text: str, role: str) -> None:
@@ -383,130 +374,45 @@ class DiagnosticsView(QWidget):
             self.party_grid.addWidget(row, index // (2 if width >= 600 else 1), index % (2 if width >= 600 else 1))
 
     def refresh(self, snapshot, presentation: Mapping | None = None) -> None:
-        presentation = presentation or {}
-        details = getattr(snapshot, "details", {}) or {}
-        connected = bool(getattr(snapshot, "connected", False))
-        heartbeat = _payload(details.get("heartbeat"))
-        party_payload = _payload(details.get("party_payload"))
-        party = details.get("display_party_state") or details.get("party_state")
-        members = tuple(getattr(party, "pokemon", ()) or ())
-        fresh = details.get("party_payload_fresh") is True
-        valid = bool(party is not None and getattr(party, "party_count_valid", False)
-                     and not getattr(party, "error", None)
-                     and all(getattr(mon, "checksum_valid", False) for mon in members))
-        warning = getattr(party, "live_read_warning", None)
-        domain = party_payload.get("active_domain") or heartbeat.get("active_domain")
-        game = str(presentation.get("game_name") or "Unavailable")
-        age = details.get("ram_age_seconds")
-        if age is None:
-            received = getattr(details.get("party_payload"), "received_at", None)
-            if isinstance(received, (int, float)) and not isinstance(received, bool):
-                age = max(0.0, time.monotonic() - received)
-        self.last_update.setText(
-            f"LAST RAM UPDATE  ·  {max(0.0, age):.1f}s ago"
-            if isinstance(age, (int, float)) and not isinstance(age, bool)
-            else "LAST RAM UPDATE  ·  Never"
-        )
-        self.domain.setText(f"RAM DOMAIN  ·  {domain or 'Unavailable'}")
-        self.fields["connection"].update_value(
-            "Connected" if connected else "Disconnected",
-            "Emulator heartbeat received." if connected else "Waiting for the BizHawk Lua connection.",
-            "success" if connected else "warning",
-        )
-        self.fields["game"].update_value(game, f"RAM domain · {domain or 'Unavailable'}")
-        party_value = "Valid" if valid and fresh and not warning else (
-            "Read warning" if fresh and warning else "Invalid" if fresh and not valid
-            else "Stale" if party is not None else "Waiting"
-        )
-        self.fields["party"].update_value(
-            party_value,
-            str(warning or getattr(party, "error", None) or (
-                f"{len(members)} party members decoded." if valid else "No valid party snapshot received."
-            )),
-            "success" if valid and fresh and not warning else "warning",
-        )
-        command = str(presentation.get("command_state") or "UNKNOWN")
-        command_ready = command.upper() in {"READY", "ACKNOWLEDGED", "AVAILABLE"}
-        command_problem = any(word in command.upper() for word in ("STALE", "TIMEOUT", "UNAVAILABLE"))
-        self.fields["command"].update_value(
-            "Unverified" if command == "UNKNOWN" else command.replace("_", " ").title(),
-            "Status from movement command acknowledgements.",
-            "success" if command_ready else "warning" if command_problem else "info",
-        )
-        pc_status = _without_prefix(presentation.get("pc_status"), "Status:")
-        pc_layout = _without_prefix(presentation.get("pc_layout"), "Box layout:")
-        boxed = _without_prefix(presentation.get("boxed_count"), "Boxed Pokemon:", "—")
-        acquisition = _without_prefix(presentation.get("acquisition_status"), "Monitoring new catches:")
-        pc_event = _without_prefix(presentation.get("pc_event"), "Last PC event:", "")
-        pc_ready = pc_status.casefold() == "monitoring"
-        layout_ready = pc_layout.casefold() == "resolved"
-        self.fields["pc"].update_value(pc_status, "Current PC resolver and monitor state.", "success" if pc_ready else "warning")
-        self.fields["layout"].update_value(pc_layout, "Validated layout for the current emulator session." if layout_ready else "Awaiting validation in this session.", "success" if layout_ready else "warning")
-        self.fields["acquisition"].update_value(acquisition, "PC acquisition monitoring reported by the runtime.")
-        self.fields["boxed"].update_value(boxed, pc_event or "Waiting for a validated PC snapshot.")
+        # Compatibility for previews/older callers; the application uses typed
+        # runtime observations and never sends widget strings through this path.
+        health, overrides = legacy_health_observation(snapshot, presentation, now=time.monotonic())
+        self.refresh_health(health, _legacy_overrides=overrides)
 
-        recovering = any(term in pc_status.lower() for term in (
-            "discovering", "validating", "baseline", "rediscovery", "recover"
-        ))
-        if not connected:
-            title, description, state, role = (
-                "Waiting for BizHawk", "Connect the emulator to inspect live system health.",
-                "DISCONNECTED", "warning",
-            )
-        elif not fresh or not valid or warning:
-            title, description, state, role = (
-                "Connection needs attention",
-                "The emulator heartbeat is available; party data is stale or has a read warning.",
-                "ATTENTION", "warning",
-            )
-        elif recovering:
-            title, description, state, role = (
-                "PC resolver is recovering",
-                "Party data is current. PC monitoring is waiting for layout validation and its baseline.",
-                "RECOVERING", "warning",
-            )
-        else:
-            # Do not claim command/PC health from a fresh party stream alone.
-            title, description, state, role = (
-                "Connected · party current",
-                f"BizHawk · {game}. Review command and PC health below.", "LIVE RAM", "success",
-            )
-            if command_ready and pc_ready and layout_ready:
-                title = "Connected & healthy"
-                description = f"BizHawk · {game} · Party and PC monitoring current."
-        self.hero_title.setText(title)
-        self.hero_description.setText(description)
-        self.hero.setToolTip(f"{self.last_update.text()}\n{self.domain.text()}")
-        _status(self.global_status, state, role)
-        if self.connection_icon.property("statusRole") != role:
-            self.connection_icon.setProperty("statusRole", role)
-            self.connection_icon.setPixmap(line_icon("health", "#57e5a2" if role == "success" else "#ffcb69", 24).pixmap(24, 24))
+    def refresh_health(self, health: DiagnosticHealthObservation, *, _legacy_overrides=None) -> None:
+        text = format_diagnostic_health(health)
+        self.last_update.setText(text.last_update)
+        self.domain.setText(text.domain)
+        for key, field in text.fields:
+            value = (_legacy_overrides or {}).get(key, field.value)
+            self.fields[key].update_value(value, field.detail, field.role)
+        self.hero_title.setText(text.title)
+        self.hero_description.setText(text.description)
+        self.hero.setToolTip(f"{text.last_update}\n{text.domain}")
+        _status(self.global_status, text.global_status, text.role)
+        if self.connection_icon.property("statusRole") != text.role:
+            self.connection_icon.setProperty("statusRole", text.role)
+            self.connection_icon.setPixmap(line_icon("health", "#57e5a2" if text.role == "success" else "#ffcb69", 24).pixmap(24, 24))
             refresh_style(self.connection_icon)
-        self._refresh_party(members, fresh, valid)
-        self.rediscover_button.setEnabled(bool(presentation.get("rediscover_enabled", connected)))
-        recovery_message = str(presentation.get("recovery_message") or "")
-        self.recovery_message.setText(recovery_message)
-        self.recovery_message.setVisible(bool(recovery_message))
-        progress = presentation.get("discovery_progress")
-        self.progress.setVisible(isinstance(progress, (int, float)) and not isinstance(progress, bool))
-        if isinstance(progress, (int, float)) and not isinstance(progress, bool):
-            self.progress.setValue(max(0, min(100, int(progress))))
-        supplied_events = presentation.get("events") or ()
-        if isinstance(supplied_events, str):
-            supplied_events = (supplied_events,)
-        for event in supplied_events:
-            self._record_event(str(event))
-        if pc_event and pc_event != self._last_pc_event:
-            self._record_event(pc_event)
-            self._last_pc_event = pc_event
-        if recovery_message and recovery_message != self._last_recovery:
-            self._record_event(recovery_message)
-            self._last_recovery = recovery_message
+        self._refresh_party(health.party.members, health.party.fresh, health.party.display_valid)
+        pc = health.pc
+        self.rediscover_button.setEnabled(pc.rediscover_enabled)
+        self.recovery_message.setText(pc.recovery_message)
+        self.recovery_message.setVisible(bool(pc.recovery_message))
+        self.progress.setVisible(health.progress_percent is not None)
+        if health.progress_percent is not None:
+            self.progress.setValue(max(0, min(100, int(health.progress_percent))))
+        for event in health.events:
+            self._record_event(event)
+        if pc.last_event and pc.last_event != self._last_pc_event:
+            self._record_event(pc.last_event)
+            self._last_pc_event = pc.last_event
+        if pc.recovery_message and pc.recovery_message != self._last_recovery:
+            self._record_event(pc.recovery_message)
+            self._last_recovery = pc.recovery_message
         self._render_events()
-        # Normal health remains sparse; actionable recovery and real events
-        # are still surfaced without requiring the advanced preference.
         useful_events = [event for event in self._events if event.lower() not in {"no pc events yet.", "no pc events yet"}]
-        self.recovery_panel.setVisible(bool(recovery_message or recovering or useful_events))
+        self.recovery_panel.setVisible(bool(pc.recovery_message or pc.recovering or useful_events))
 
     def _refresh_party(self, members: tuple, fresh: bool, valid: bool) -> None:
         _status(self.party_state_label, "LIVE" if fresh and valid else "LAST SNAPSHOT" if members else "WAITING",

@@ -349,3 +349,558 @@ bytes cannot be identified separately under the existing protocol.
 Phase C remains the appropriate next slice: separate runtime orchestration/pure
 diagnostics and remove duplicate recommendation work with targeted behavior tests.
 It is not implemented or started automatically in this pass.
+
+## Phase C1: recommendation orchestration and diagnostic formatting
+
+Implemented the first bounded portion of Phase C only. Phase B's data-source
+freshness, decode/display reuse and fallback expiration are unchanged. No transport
+refactor, input-safety change, persistence change, UI redesign or new feature is
+included.
+
+### Execution trace and dependencies
+
+Before this slice the full RAM poll called `_refresh_tracker_party`, which called
+`_refresh_party_workspaces`, which refreshed recommendations using retained yields
+from the **previous** poll. Later in the same poll `_refresh_training_recommendations`
+ran again with the current validated active enemies. Thus 30 polls invoked the
+recommendation update 60 times. With six checksum-valid party members in an active
+battle, that meant **360 individual core classifications**, not merely 60 calls.
+On changed enemies the first and second updates could differ; this was not safe to
+solve by simply deleting the final/current-opponent update.
+
+The other workspace refresh callers are `_toggle_training_stat`,
+`_edit_training_focus`, `_clear_training_focus`, `_edit_ev_target` and
+`_clear_ev_target`, plus standalone `_refresh_tracker_party` callers. Those paths
+must keep an immediate refresh using the most recently polled opponent yields.
+`_select_party_slot` updates all workspace selectors and rendering. The selected
+member affects which result compact presentation shows, not the all-member core
+classification. `tracker_views.RecommendationPanel` and
+`compact_training.CompactTrainingView` consume results; they do not invoke the
+core calculator. `opponent_panel` displays current battlers and provider EV labels,
+also without classifying training recommendations.
+
+`core.ev_training.recommend_battle_evs` depends only on the allowed-stat preference
+and the sum of positive opponent yields. Numeric targets, current EV totals,
+level/HP, species and held items do not affect this existing function. Numeric
+targets therefore continue updating their own presentation on direct edits without
+invalidating an otherwise equivalent training classification. Single/double battles
+retain Good/Avoid/Mixed/No Focus semantics and the existing idle/unavailable states.
+
+Diagnostics inspection covered `diagnostics_view` (health widgets consuming current
+snapshot and runtime strings), `diagnostics_tools` (widget construction/command
+wiring), and MainWindow's detailed formatter. The first extracted section contains
+only coordinates, pointer fields, raw battler fields and already-formatted provider
+EV labels. It is independent of safety decisions and acquisition/store state.
+
+### Bounded implementation
+
+- `ui/battle_recommendations.py`: `TrainingMember` and
+  `BattleRecommendationPresentation` are small frozen input/output values.
+  `project_battle_recommendations` classifies eligible members and prepares combined
+  yield values. `BattleRecommendationProjector` owns exactly one latest input/result
+  pair; there are no per-view or per-opponent caches. Keys include member slot,
+  stable identity and preference, immutable provider-resolved yields, capability
+  availability and provider identity. Eligibility is rebuilt from current cards,
+  so checksum-invalid or removed members invalidate the member set.
+- MainWindow stays the composition root. The full poll refreshes party workspaces
+  with recommendation publication deferred, then publishes once with the current
+  validated enemies. Standalone party updates and direct focus/target edit handlers
+  retain their default immediate publication. Provider yield lookups happen on each
+  update; no enemy objects or receipt timestamps are retained by the projector.
+  Stale snapshots expose no active enemies as before; disconnect supplies empty
+  yields. Unsupported capabilities bypass lookup and publish unavailable results.
+- Normal and compact consumers receive the same `training_recommendations` dict,
+  retaining the existing compatibility attribute. Values come from the immutable
+  shared projection. The dictionary is replaced only when that projection changes.
+  Widgets still render each publication, so selection, names, evolution, enemy
+  level changes and other presentation details update even without classification.
+  A changed focus preference is read immediately by direct UI handlers and on the
+  next poll for external store edits. Target edits never rewrite training focus.
+- `ui/diagnostics_presentation.py`: `RamBattleDiagnosticObservation` carries a small
+  snapshot-derived observation into `format_ram_battle_diagnostics`. The formatter
+  has no Qt imports, clocks, validation, provider lookup, state mutation or commands.
+  MainWindow supplies position and EV labels and retains live command telemetry,
+  acquisition classification, missing-party handling and widget/scroll updates.
+  Detailed formatting and safety telemetry remain active off the diagnostics page.
+- Approximately 100 lines of pure formatting moved out of MainWindow. Remaining
+  per-Pokémon/acquisition, PC discovery/SRAM, coordinate analysis and walk transport
+  telemetry are deliberately not moved in this first bounded slice.
+
+### Measurements
+
+Extended the existing opt-in benchmark with active six-member double-battle polls,
+predecoded single/double opponent transitions, calculation call counts and a
+diagnostic harness with a no-op text sink. Each timing uses three warmups and five
+rounds of 30 iterations. Changed-opponent timings include **two full polls** per
+iteration and exclude fixture battler construction. The diagnostic measurement
+includes the existing orchestration/telemetry formatter and the extracted text
+section, with an empty party, four battler records and two active enemies; it is
+not a whole-diagnostics-page or pure-helper-only measurement.
+
+Before/after runs used the same fixtures, script, interpreter and host, sequentially
+without overlapping test/build jobs. Other system load remains uncontrolled.
+[Raw results](../benchmarks/results/ui-orchestration.json) retain all timing rounds
+and diagnostic output; output matches the pre-extraction text exactly.
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| Recommendation publications, 30 warm active polls | 60 | 30 |
+| Individual core classifications, 30 warm active polls | 360 | 0 |
+| RAM diagnostic updates, 30 warm active polls | 30 | 30 |
+| Full unchanged active-battle UI poll, median | 6.6915 ms | 6.2312 ms |
+| Changed single/double opponent pair, median | 23.6798 ms | 25.4989 ms |
+| Diagnostic formatting harness, median | 0.0435 ms | 0.0429 ms |
+| Full unchanged idle UI poll, median | 6.7605 ms | 6.0397 ms |
+| Full unchanged poll through Phase B RAM source, median | 6.5047 ms | 7.0124 ms |
+
+The reduction in publications/classifications is deterministic. After warming,
+equivalent polls reuse the same six member results; changed yields/preferences/
+membership still classify immediately. Timing ranges overlap, and some medians
+are higher after the change. These measurements establish less redundant work,
+**not a reliable broad responsiveness or changed-input speed improvement**.
+Diagnostic extraction is justified by separation/testability, not by a timing gain.
+Live FPS, active commands, large archives and real network/emulator timing were not
+measured. No percentage speedup is claimed.
+
+### Regression coverage, verification and next slice
+
+`tests/test_ui_orchestration.py` adds 19 regression cases: all four classifications,
+empty/zero/unknown yields and unsupported capabilities; bounded projection/provider
+invalidation; one publication per poll and no repeated equivalent classifications;
+external preference edits, direct focus/target edits, selection and reorder;
+changed provider rewards and enemy levels; invalid data, stale-opponent clearing,
+disconnect/reconnect; missing diagnostic values, zero/negative coordinates and
+absent deltas; hidden-page telemetry and missing-party output. A captured
+pre-extraction diagnostic fixture protects text, ordering and raw missing fields.
+Existing single/double battle, modal edit/reorder, compact and game-provider tests
+also passed. Phase B's 30 snapshot reuse tests remain in the full suite.
+
+- Final focused run: **143 passed in 36.37 s**.
+- Complete pytest run: **799 passed in 148.99 s**; this duration is a verification
+  measurement, not a UI performance metric.
+- Ruff and `git diff --check`: passed.
+- Source archive and wheel: built successfully with `python -m build --no-isolation`.
+
+Changed responsibilities are limited to MainWindow publication/delegation, the two
+new UI modules, new regression tests/golden fixture, benchmark script/results and
+architecture/roadmap documentation. No commit or push was requested or performed.
+
+Live smoke testing remains necessary for real single/double battle transitions,
+selection during roster changes, direct focus edits during polling, stale/recovered
+RAM, compact/full rendering and walk acknowledgements with diagnostics hidden.
+The projection does not add freshness policy: direct edits use the latest polled
+validated opponent yields, as before; the data source/poll retains ownership of
+elapsed-time freshness and enemy removal.
+
+Recommended next slice is a bounded C2 extraction of per-Pokémon diagnostic text
+after resolving acquisition observations in MainWindow, followed by a small typed
+diagnostics-health observation replacing the current runtime string mapping.
+Characterize store/run/observer and safety telemetry inputs first. Do not move
+recovery decisions or transport operations, and do not start the transport refactor
+automatically.
+
+## Phase C2: per-Pokemon diagnostic presentation
+
+Implemented C2 only, preserving the existing C1 work in the working tree. This
+slice adds no feature, UI design, protocol, identity, RAM validation, persistence,
+game integration, cache policy or backup/input-safety change.
+
+### Inspection and characterization
+
+Reviewed MainWindow's detailed party diagnostics, PC storage record text, anchor
+inspection results and discovery sample helper; C1's diagnostic formatter;
+`diagnostics_view` health rows and missing/stale handling; `diagnostics_tools` widget
+construction and command wiring; provider acquisition/species/PC APIs; decoded
+Gen IV party and box models; and existing nickname, party, PC and diagnostic tests.
+
+The detailed party block contains PID/address/identity, checksum/permutation,
+species/nickname bytes and offsets, nature/ability/friendship, held-item resource
+facts, IVs/packed flags, acquisition metadata and raw party-tail stats. EVs are
+withheld on failed checksum. Acquisition classification, suggested location and
+already-observed status depend on the active provider/run/store and must remain
+live. Item slug/path/existence checks inspect resources and are observations, not
+pure formatting. PC record addresses depend on provider box layout. Anchor
+inspection results are already-observed transport dictionaries containing identity
+copies, spacing, references, movement summaries and raw byte dumps.
+
+The detailed log has **no existing move/PP section**, and no new section was added.
+Move slots/PP remain in the existing Phase A projection and tracker views. Likewise,
+the detailed raw-record formatter does not add new stale markers: existing checksum
+and tail validation text is preserved, while health rows and live transport telemetry
+continue displaying snapshot freshness and withheld HP in their established paths.
+
+Before extraction, `tests/test_pokemon_diagnostics.py` captured complete text in
+`tests/fixtures/pokemon-diagnostics.json` and passed **21 characterization cases**.
+Item asset facts were fixed for portability; no absolute user-specific paths,
+actual save records or live emulator inputs are in the fixture. Cases include valid
+and invalid party records, unknown metadata, missing addresses/nickname terminator,
+stale display flags, invalid battle tails, empty/missing party and invalid counts;
+valid/invalid/unknown boxed records and empty/missing storage; and valid/empty/
+malformed/movement anchor results.
+
+### Extracted responsibilities
+
+- `ui/pokemon_diagnostics.py::format_party_pokemon_diagnostics` consumes the existing
+  `PartyPokemon` model and a frozen `PartyPokemonDiagnosticObservation`. It streams
+  unchanged text lines into the caller's existing collector, avoiding an extra
+  complete intermediate list/tuple of party lines. Generation-specific offsets
+  reuse the existing Gen IV constants; there is no duplicated decoder or validation.
+- `format_boxed_change_diagnostics` and `format_boxed_record_diagnostics` consume
+  existing `BoxedPokemon` models and return their original literal text tuples.
+  The caller supplies the calculated address. They preserve the separate boxed
+  contract: no party-tail HP/stats, with raw 136-byte record and stored/calculated
+  checksum fields on the record detail path.
+- `ui/pc_inspection_presentation.py::format_pc_pokemon_inspection` takes the received
+  inspection mapping and provider-resolved species mapping, retaining the original
+  list-of-lines return and text ordering. Parsing numeric labels and rendering hex
+  dumps remain display operations; no Pokemon decoding, checksum decisions or
+  movement baseline updates occur here. MainWindow keeps its compatibility wrapper.
+- MainWindow still resolves acquisition candidates, classification/location and
+  observed status on every refresh; gathers item-resource facts; computes boxed
+  addresses from the provider; and owns active session/run coordination, raw
+  snapshot observation, commands, scheduling, recovery/safety and widget/scroll
+  updates. `diagnostics_view` health/state/widget logic and `diagnostics_tools`
+  construction/command wiring are unchanged. No new mutable runtime cache/state
+  was introduced.
+- The discovery sample helper still invokes the provider's existing box decoder
+  where that input is raw rather than a decoded model. It was deliberately not
+  moved into presentation: interpreting raw records is not pure text formatting.
+  C2 adds no decoding to any extracted path.
+
+Source-span counts from the AST, including blank lines, illustrate responsibility
+movement rather than a runtime performance or maintainability score:
+
+| MainWindow source span | Before | After |
+| --- | ---: | ---: |
+| MainWindow class | 5,068 lines | 4,726 lines |
+| `_refresh_ram_party_debug` | 216 lines | 90 lines |
+| `_pc_storage_debug_text` | 238 lines | 206 lines |
+| `_pc_pokemon_inspection_lines` | 186 lines | 2 lines |
+
+### Measurements and verification
+
+Extended `benchmarks/runtime_fixtures.py` with one decoded party member, one boxed
+record/change and a supplied anchor inspection payload, all using no-op text sinks.
+Fixture decoding occurs before the timed callbacks. Party timing includes live
+acquisition preparation and fixed item-resource observations; boxed timing includes
+the surrounding existing PC diagnostic formatter. These are not pure-helper-only
+or live rendering measurements. Three warmups, five rounds of 30 iterations, same
+host/interpreter/script/fixtures, sequential before/after runs without overlapping
+tests/builds. Other system load remains uncontrolled. Formatting-only source style
+cleanup afterward did not change the measured operations.
+
+| Fixture median | Before | After |
+| --- | ---: | ---: |
+| Party diagnostic refresh | 0.0732 ms | 0.0816 ms |
+| Boxed diagnostic refresh | 0.0142 ms | 0.0172 ms |
+| Anchor inspection formatting | 0.0126 ms | 0.0119 ms |
+| Full unchanged poll through Phase B RAM source | 6.6493 ms | 6.2772 ms |
+
+Timing ranges overlap. Some medians increased; **no formatting speedup, allocation
+improvement or broad responsiveness improvement is claimed**. This is a separation
+and correctness refactor. Outputs consume existing models and bounded transient
+context rather than copying/redecoding them or adding persistent caches. Existing
+unchanged-text guards still prevent redundant editor updates. C1's 30 warm active
+polls still produced 30 recommendation updates, zero repeated member classifications
+and 30 RAM diagnostic updates in both runs. Raw rounds and metadata are in
+[pokemon-diagnostics.json](../benchmarks/results/pokemon-diagnostics.json).
+
+The final new module has **26 cases**: the 21 pre-extraction characterizations plus
+pure formatter/no-decoding/input-preservation checks, unsupported acquisition
+capabilities, anchor byte dump output/input preservation, equivalent editor text
+and cursor preservation, and stale/invalid/empty health-row presentation. Checks
+cover PID/identity, missing/unknown metadata, party/box differences, checksum failure,
+stale flags, move slots/current PP and invalid-read masking, and live observed status
+changes on the same decoded record. Existing Phase B, C1, nickname, provider, PC
+and diagnostics tests remain part of the regression gates.
+
+- Focused suite: **211 passed in 40.75 s**.
+- Complete pytest suite: **825 passed in 149.08 s**. Test duration is not an
+  application performance measurement.
+- Ruff and `git diff --check`: passed.
+- Source archive and wheel built successfully with `python -m build --no-isolation`.
+  The packaging check used approved access to Python's temporary build directories.
+
+Changed C2 responsibilities/files: MainWindow delegation and live observation
+preparation; new `ui/pokemon_diagnostics.py` and
+`ui/pc_inspection_presentation.py`; new characterization/regression module and JSON
+fixture; benchmark callbacks/results; architecture and roadmap notes. Earlier C1
+working-tree edits were preserved. No commit or push was requested or performed.
+
+Remaining architectural concerns: health presentation still receives runtime strings
+read from widgets; MainWindow retains substantial PC discovery/SRAM orchestration,
+thread/scheduling and command/safety telemetry. The raw discovery-sample decoder
+should not be hidden inside a pure presentation API. Large anchor hex dumps remain
+potentially expensive, but changing their rendering/limits would require separate
+profiling and behavior characterization.
+
+Recommended next bounded slice: replace the diagnostics health runtime string
+mapping with a small typed observation prepared from live state, preserving current
+freshness/recovery decisions and command safety. Characterize raw/display/run and
+missing capability cases before extraction. Do not proceed automatically to that
+slice or to the transport refactor.
+
+Live verification remains necessary for real PC inspection/movement experiments,
+active-run acquisition labels during catches/run switches, stale/recovered RAM,
+nickname/item resources and text scrolling alongside walk/PC commands. No live
+BizHawk session or real user save data was used in this pass.
+
+## Phase C3 audit (before implementation)
+
+The selected boundary is diagnostic dashboard observation/presentation and its
+related compact/system status mirrors. Existing controllers remain authoritative.
+
+| Dependency | Origin and consumers | Planned boundary |
+| --- | --- | --- |
+| Six PC label texts read in the RAM poll | `_refresh_pc_storage_compact_status` writes status/layout/count/acquisition/event/recovery labels; the poll reads them for DiagnosticsView, Nuzlocke PC summary and shell status | Return an immutable PC observation from the same runtime inputs; format each consumer from it |
+| Rediscover button `isEnabled()` read back | Compact PC renderer derives availability from status; poll mirrors it into diagnostic/compact buttons | Derive the same eligibility from the typed phase, retaining dispatch checks |
+| PC status/layout words parsed by DiagnosticsView | Casefold `Monitoring`/`Resolved`; recovery inferred from substrings | Use explicit readiness/recovering fields; wording stays presentation only |
+| `_walk_command_state` interpreted by DiagnosticsView | Runtime walk/ack handling assigns UNKNOWN, READY, waiting, unavailable, stale and timeout tokens; view infers readiness/problem from words | Normalize exact existing tokens once at the observation boundary; unknown/unsupported remain distinct |
+| Party freshness and validity in DiagnosticsView | Data-source `party_payload_fresh`, raw/display party and warning/error fields | Observe raw validity and display validity separately; heartbeat alone cannot establish them |
+| Connection/age/domain/session | Snapshot connected flag and timestamped payload/heartbeat; data source owns expiry; Lua/controller fields own session resets | Immutable observation from existing fields and explicit observation time; no new freshness policy |
+| Recovery text and discovery state | Runtime lifecycle/progress/session results plus `pc_discovery_failure_message`; controls/manual retry render those facts | Keep recovery decisions in MainWindow; health readiness never inferred from the message text |
+| Label `text()` equality checks | Party/PC editor/status update guards | Retain: these suppress redundant presentation writes, not safety decisions |
+| User editable widget values | Anchor/nickname/species selections, scan offsets and paths | Retain as explicit user input, distinct from runtime health |
+| Hero tooltip reads its own labels | DiagnosticsView combines already-formatted update/domain strings | Replace with the same formatted values directly |
+
+The audit found no PC label-text dependency in acquisition validation, baseline
+arming, rediscovery dispatch, command acknowledgement or walk safety decisions.
+Those use snapshots, provider capabilities and runtime flags/identities. PC
+button gating is a UI eligibility decision, not authority to bypass the existing
+request checks. The health projection will not be consumed as a new safety policy.
+Existing `DiagnosticsView.refresh(snapshot, mapping)` compatibility can remain as
+an isolated presentation adapter; production will pass typed observations directly.
+
+## Phase C3: typed diagnostic health
+
+Implemented C3 only. The preceding table was written before changing the selected
+health paths. No controller/transport extraction, game integration, protocol,
+persistence, backup or UI design change is included. Earlier working-tree work
+from C1/C2 was preserved.
+
+### Models, ownership and dependency direction
+
+- `core/diagnostic_health.py` adds frozen `ConnectionHealth`, `PartyReadHealth`,
+  `CommandChannelHealth`, `PCMonitoringHealth` and `DiagnosticHealthObservation`.
+  `HealthState` explicitly distinguishes healthy, unhealthy, unknown, stale and
+  unsupported. `PCPhase` distinguishes connecting, monitoring, layout validation,
+  baseline establishment, discovery, paused and rediscovery stages. These are
+  observations, not a replacement controller or new safety policy.
+- `observe_diagnostic_health` reads the existing data-source snapshot with an
+  explicit observation time. It does not read RAM, decode records or infer
+  freshness from a heartbeat: the data source's freshness flag remains authoritative.
+  It records raw validity separately from stabilized display validity, captures
+  existing stream identity fields and normalizes missing/malformed booleans,
+  metadata and non-finite ages to unknown/unavailable observations. Records are
+  referenced through their existing tuple, not redecoded or copied into a second
+  authoritative party store.
+- `observe_command_channel` normalizes exact existing runtime command-state tokens.
+  READY/ACKNOWLEDGED/AVAILABLE are healthy claims; explicit stale/timeouts/unavailable
+  are distinct from unknown and awaiting acknowledgements. Unsupported capability
+  overrides the reported token. A recent heartbeat supplies no command readiness.
+  The runtime `_walk_command_state` and all acknowledgement/time/safety handling
+  remain in MainWindow; health normalization does not dispatch or permit movement.
+- `_refresh_pc_storage_compact_status` now returns an ephemeral PC observation
+  derived from the same connected/readiness flag, resolver lifecycle, storage data,
+  discovery outcome and current session tags. MainWindow still decides recovery
+  conditions, uses the existing failure-message helper, calculates phase/control
+  eligibility and renders advanced context. Discovery completion is distinct from
+  monitoring readiness; a completed scan does not establish a baseline by itself.
+- `ui/diagnostic_health_presentation.py` provides pure field/hero and PC text
+  projections. MainWindow renders PC diagnostics and uses the same observation
+  for Nuzlocke summary, shell status and compact rediscovery eligibility.
+  `DiagnosticsView.refresh_health` renders the complete typed observation. No new
+  mutable health cache or shared authoritative state is retained between polls.
+- `ui/diagnostic_health_compatibility.py` isolates the existing
+  `DiagnosticsView.refresh(snapshot, mapping)` API for older callers/previews.
+  That adapter still accepts claimed presentation strings to preserve its contract;
+  **production polling does not use it**, and it cannot affect any acquisition,
+  baseline, transport or walking guard. Legacy mapping field wording/events/progress
+  behavior remains characterized separately from authoritative runtime observation.
+
+### Dependencies removed and preserved
+
+Removed all six PC label text readbacks and rediscover-button enabled-state
+readbacks from the health/mirror pipeline. Removed production substring inference
+of PC recovery/monitor/layout readiness in DiagnosticsView. Hero tooltips now use
+the pure formatted update/domain values instead of reading their labels. Runtime
+observation now flows into health and then into presentation; the health model
+is never used to replace current input/acquisition/recovery safety decisions.
+
+Remaining widget-derived values are intentional user inputs (species/nickname,
+anchors, coordinates and filesystem selections), equality/style guards that avoid
+redundant widget updates, and view event/scroll state. They are not health authority.
+Controller lifecycle and command states still use their existing string tokens;
+normalizing those into controller enums is future work, not silently done in this
+slice. Legacy presentation-mapping parsing remains solely in the compatibility
+adapter, with no application safety consumer.
+
+Normal wording is preserved. Two inconsistent/malformed input cases no longer
+claim healthy facts: a valid display fallback cannot certify invalid raw RAM when
+the warning is absent, and missing session tags cannot label a layout resolved
+merely because two absent IDs compare equal. Non-finite ages and malformed flags
+do not invent freshness/readiness. These are diagnostic correctness adjustments;
+the RAM/PC validation and acquisition/command/walking policies remain unchanged.
+
+Source-span counts (AST spans including blank lines): MainWindow **4,726 → 4,735**
+lines, reflecting explicit observation preparation; DiagnosticsView **432 → 347**
+lines. Its old `refresh` mixed observation, inference and widget updates in 125
+lines; the compatibility entry point is now five lines, with a 34-line typed
+renderer. The objective is ownership and reliable facts, not fewer total lines.
+
+### Characterization and verification
+
+Before extraction, 11 dashboard wording/role fixtures were captured and passed for
+valid/invalid/stale/disconnected RAM, unknown/pending/stale command state, absent PC,
+discovery/baseline recovery and failure. They still pass through the preserved
+legacy entry point. New typed tests cover raw/display validity separation, independent
+heartbeat/command/PC readiness, enum states, immutable observations, unsupported
+capabilities, missing/malformed fields and overflow/non-finite ages, stream restart,
+PC pending/failed/validation/baseline/success/stale stages, recovery transitions,
+session mismatch and missing tags, and consistent model/widget/control presentation.
+
+An integration test makes PC label `.text()` and rediscover `.isEnabled()` access
+raise during a real full UI poll. The typed dashboard/system mirrors and existing
+acquisition observer still run. Another test puts misleading healthy words in a
+recovery message and verifies that they do not change readiness or recovery state.
+Phase B snapshot and C1 recommendation regressions remain included in verification.
+
+Verification: all **867 tests passed in 159.55s**; the focused health, diagnostics,
+PC acquisition, snapshot reuse, orchestration, provider and walking selection
+passed **142 tests in 37.09s**. The new health module independently passed its
+**42 characterization/regression cases in 6.40s**. Ruff and `git diff --check`
+passed. `python -m build --no-isolation` successfully built the sdist and wheel.
+An earlier full run encountered a Windows `WinError 5` replacing a temporary
+preferences file during an unrelated compact-layout test's setup (866 passed,
+one failed). The final isolated full rerun passed without production or test changes.
+No application latency/FPS benchmark was performed in C3, and no performance
+improvement is claimed. The new projection is built per poll; it does not change
+the existing polling frequency, decoding cache lifetime or recommendation reuse.
+Test durations are verification measurements, not responsiveness evidence.
+
+Changed C3 responsibilities/files: `core/diagnostic_health.py`; pure health
+presentation and isolated compatibility adapter; MainWindow observation/delegation;
+DiagnosticsView typed rendering; new characterization/regression tests and wording
+fixture; architecture/roadmap documentation. Existing C1/C2 changes were retained.
+No commit or push was requested or performed.
+
+Remaining concerns and next bounded slice: controller command/lifecycle string
+tokens remain authoritative, PC orchestration and asynchronous discovery ownership
+remain concentrated in MainWindow, and legacy callers can still supply claimed
+presentation strings for preview. A small, separately characterized controller
+state-token normalization and lifecycle transition audit is preferable before any
+larger controller or transport extraction. Do not start that next slice automatically.
+
+Live BizHawk smoke checks remain necessary for acknowledgement timing during
+walk start/stop and stale reads, TCP/file reconnect, emulator/ROM restart, real PC
+discovery/cache-confirmation failures, baseline recovery and current-session labels.
+This pass used synthetic snapshots and isolated Qt fixtures, not a running emulator
+or real user save data.
+
+## Phase C4 boundary selection (before extraction)
+
+Reviewed polling, C3 health projections, acquisition/reconciliation, notifications,
+PC discovery/recovery, walking acknowledgement handling and Qt scheduling. PC and
+walking orchestration have broad dispatch/session dependencies; extracting either
+whole subsystem now would expand the behavioral risk. EV history already has a
+domain observer and mostly presentation work remains.
+
+Selected the **raw-party lifecycle observation workflow**: preparing validated HP
+samples and session/frame context, sequencing death/wipe/no-run-prompt observers,
+and resetting/suppressing their observation state after an accepted run end.
+These three observers already consume the same authoritative raw inputs. Their
+baselines and prompt suppression can have one non-Qt owner without owning the
+store, widgets, transport, PC gates or walking state.
+
+The coordinator receives the provider and clock explicitly, and each process call
+receives current raw party/payload, connection, run identity, freshness threshold,
+prompt eligibility and three narrowly scoped event handlers. It executes handlers
+in the existing order: deaths, wipe, then prompt. A wipe handler may synchronously
+end the run and call the coordinator's reset/suppression operation before prompt
+evaluation. Persistence/dialog decisions remain with existing UI owners; callback
+exceptions retain their current propagation. No replacement diagnostic freshness
+policy is introduced, and C3 display health does not authorize HP observation.
+
+Before production changes, seven full-poll characterization cases passed for
+normal death/wipe ordering, invalid/stale/disconnected samples, restart/rollback,
+recovery rebaselining and session-scoped no-run prompting.
+
+## Phase C4: raw-party lifecycle coordination
+
+Implemented this one boundary only. `PartyLifecycleCoordinator` owns the three
+existing domain observers, provider nickname conversion and an explicitly injected
+clock. Its public interface is `process` plus `run_ended`; it receives neither
+MainWindow nor Qt widgets, transport/server, store or settings objects. Each poll
+passes scalar policy inputs and original raw records/payload. Handlers perform
+existing UI/persistence actions synchronously; they are not retained as shared
+application state or routed through extra signals. The coordinator does the
+validation, sample preparation and observer sequencing itself rather than asking
+MainWindow to perform those steps.
+
+Accepted run end now uses one reset/suppress operation. Unaccepted/ignored/pending
+wipes leave observation behavior unchanged. Death delivery still precedes wipe
+observation, and wipe handling still precedes prompt observation, including nested
+dialog/run-end behavior. Callback errors propagate as before, skipping subsequent
+workflow steps. The captured run identity remains fixed for the current poll,
+matching prior behavior even when a handler changes the active run.
+
+The existing raw validation and frame conversion functions moved unchanged in
+meaning to `core/nuzlocke/party_snapshot.py`. Acquisition and walking callers reuse
+those functions; no new protocol parsing, RAM decoder or validation policy was
+introduced. The clock is evaluated only after the same party/payload/received-time
+checks as before. Raw death eligibility still includes timestamp age, party count,
+checksum/warning/sample-stale flags, current stats and HP bounds. C3 health is a
+diagnostic projection, not a substitute for this workflow's stricter validation;
+healthy heartbeat or stabilized display fallback cannot authorize death detection.
+
+MainWindow no longer owns three independent lifecycle observers or prepares HP
+samples/session/frame context in its poll. It retains composition, polling,
+dialogs, accepted-wipe persistence and pending-wipe review state. AST source-span
+counts: MainWindow **4,735 → 4,691**; its full poll **483 → 443**. Three module-level
+validation/frame helpers also leave the UI module. These are scope measurements,
+not claims that moving lines alone improved architecture. Ownership now has a
+single independently exercisable boundary without duplicated baselines.
+
+### Tests and measurements
+
+Seven full-poll characterization cases were written and passed before extraction
+(5.78s), and passed after it. Twenty-six independent coordinator cases cover normal
+and repeated transitions, partial faint/reorder, missing party/payload, stale RAM,
+disconnect, checksum/count/error/warning failures, stale samples, invalid HP/stats,
+empty party, stream/run/frame changes, recovery, prompt progress/eligibility,
+unsupported provider nickname conversion, accepted-wipe suppression, handler
+failure ordering and lazy clock evaluation. They do not construct QApplication,
+MainWindow or a live emulator. Existing cache/poll-frequency and lifecycle tests
+were adjusted only to instrument observer state at its new owner.
+
+The same `benchmarks/party_lifecycle.py` fixture was run before and after extraction:
+six decoded members, an active run, fresh raw payload, fixed advancing-independent
+frame, 30 unchanged polls per round, five rounds, no live transport or user saves.
+Results are saved in `benchmarks/results/party-lifecycle-before.json` and
+`party-lifecycle-after.json`. Full-poll median was **7.7391 → 8.3355 ms**;
+round ranges **7.6252–8.1531 → 7.9099–8.9521 ms** overlap. This is a measured
+median increase of 0.5964ms, not a performance improvement or a precise estimate
+of coordinator overhead. Each existing observer still runs exactly **30 times
+over 30 polls** before and after. No extra decoding, snapshot cache, timer, signal
+or second party sample projection was added. No latency/FPS improvement is claimed.
+
+Verification: focused regression selection **188 passed in 41.42s**; complete
+suite **900 passed in 187.11s**. Ruff and `git diff --check` passed. The package
+build produced both sdist and wheel successfully with `python -m build --no-isolation`.
+The new coverage totals 33 cases (seven characterization and 26 independent tests).
+No further controller extraction or Phase D work was started.
+
+### Remaining orchestration and next bounded extraction
+
+MainWindow still coordinates acquisition/reconciliation and PC baselines/discovery,
+connection/UI scheduling, coordinate analysis, notifications, EV history and
+Friendship Walk transport acknowledgements. These workflows have not been moved
+or redesigned in C4. C3 controller lifecycle/command string tokens and the legacy
+display adapter remain as documented. A next bounded extraction should first
+characterize PC acquisition baseline ownership/reset transitions separately from
+discovery dispatch, rather than attempting the entire PC controller at once.
+Do not proceed automatically into that extraction or Phase D.
+
+Live emulator acknowledgement/reconnect/PC-discovery and real-save smoke checks
+remain manual validation work; synthetic regression coverage and builds do not
+replace them. No user save data was modified, and no commit or push was requested.

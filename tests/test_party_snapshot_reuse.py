@@ -282,11 +282,11 @@ def test_ui_observers_keep_polling_raw_inputs_and_mutable_run_state(live, snapsh
     store = window.nuzlocke_view.store
     run = store.create_run("reuse", PLATINUM_NUZLOCKE_PROFILE)
     run.starter_observation_complete = True
-    hp = Mock(wraps=window._party_hp_observer.observe)
-    wipe = Mock(wraps=window._party_wipe_observer.observe)
+    hp = Mock(wraps=window.party_lifecycle._hp.observe)
+    wipe = Mock(wraps=window.party_lifecycle._wipe.observe)
     acquisitions = Mock(wraps=window._acquisition_observer.observe)
-    window._party_hp_observer.observe = hp
-    window._party_wipe_observer.observe = wipe
+    window.party_lifecycle._hp.observe = hp
+    window.party_lifecycle._wipe.observe = wipe
     window._acquisition_observer.observe = acquisitions
     try:
         window._refresh_ram_backend_debug()

@@ -158,10 +158,10 @@ def test_auto_wipe_offers_next_run_and_rebaselines_existing_party(window, monkey
         party, connected=True, valid_snapshot=True, run=new, store=store,
         classify=lambda _candidate, _run: ("WILD", "HIGH", None)) == ()
     hp = (PartyHpSample("stable", "Shinx", "Sparky", 12, 0, 1, "Route 202"),)
-    assert window._party_hp_observer.observe(
+    assert window.party_lifecycle._hp.observe(
         hp, connected=True, valid_snapshot=True, run_id=new.run_id,
         stream_identity="stream", frame=10) == ()
-    assert window._party_wipe_observer.observe(
+    assert window.party_lifecycle._wipe.observe(
         hp, connected=True, valid_snapshot=True, run_id=new.run_id,
         stream_identity="stream", frame=10) is None
     assert new.acquisition_events == []

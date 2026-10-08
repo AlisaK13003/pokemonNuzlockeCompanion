@@ -1,0 +1,19 @@
+{
+  "unchanged_full_poll": {
+    "median_ms": 7.7391,
+    "round_ms": [
+      8.1531,
+      7.6784,
+      8.0975,
+      7.7391,
+      7.6252
+    ],
+    "iterations": 30,
+    "rounds": 5
+  },
+  "observer_calls_30_polls": {
+    "death_detection": 30,
+    "wipe_detection": 30,
+    "run_prompt": 30
+  }
+}

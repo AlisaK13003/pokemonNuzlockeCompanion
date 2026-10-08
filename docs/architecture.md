@@ -50,6 +50,50 @@ application composition, validation, observers, signal wiring and the compatibil
 callbacks. This cache contains derived presentation only; freshness, acknowledgements,
 run decisions, PID-owned targets and preferences are evaluated independently.
 
+`ui/battle_recommendations.py` owns one latest-input recommendation projection per
+window. MainWindow resolves current validated opponents through the provider and
+reads current party preferences; both normal and compact renderers consume the
+same member results. Selection controls rendering, while numeric targets remain
+independent of preference-based classification. Polling publishes recommendations
+once after the party views and current opponents have been refreshed.
+
+`ui/diagnostics_presentation.py` formats already-observed coordinate/pointer and
+battle data without Qt or live-state dependencies. MainWindow still gathers and
+validates observations, computes command/safety telemetry, resolves acquisition
+context and recovery actions, and updates widgets even when diagnostics are hidden.
+
+`ui/pokemon_diagnostics.py` formats the existing decoded party/boxed models. A
+small frozen observation supplies acquisition results and item-resource facts
+resolved by MainWindow. Party lines stream into its existing text collector;
+boxed records use caller-computed addresses. `ui/pc_inspection_presentation.py`
+formats received anchor-inspection results against a supplied species mapping.
+Neither module reads RAM, decodes records, checks files, dispatches commands or
+changes observer/baseline state. MainWindow's diagnostic callbacks remain the
+owners of live context, scheduling, freshness, safety and widget updates.
+
+`core/diagnostic_health.py` defines frozen connection, party-read, command-channel
+and PC-monitoring observations. It observes snapshot facts without validating RAM,
+parsing emulator protocol or controlling recovery. Raw validity remains distinct
+from display fallback validity. MainWindow builds one current health projection
+from runtime flags, resolver/session state and the existing snapshot; it does not
+read status labels or button state back into that projection.
+
+`ui/diagnostic_health_presentation.py` formats these facts. DiagnosticsView consumes
+typed health via `refresh_health`; the compact/Nuzlocke/system status mirrors use
+the same PC observation. The isolated `diagnostic_health_compatibility.py` adapter
+retains older snapshot-plus-presentation-mapping previews. Its string-derived
+claims are display-only and never feed application safety or runtime controllers.
+
+`core/nuzlocke/party_lifecycle.py` owns raw-party HP baselines, wipe arming and
+session prompt suppression through `PartyLifecycleCoordinator`. MainWindow passes
+current raw records/payload and run identity into `process`, together with narrowly
+scoped synchronous death/wipe/prompt handlers. The coordinator validates and maps
+samples once, sequences existing observers, and retains only their internal state.
+`run_ended` resets the transition observers and suppresses session prompting after
+an accepted wipe. Dialogs, persistence, notification presentation, acquisition
+reconciliation and scheduling remain with their existing owners. Shared unchanged
+raw validation/frame contracts live in `core/nuzlocke/party_snapshot.py`.
+
 See [the first engineering audit and measurements](refactor-roadmap.md) for the
 baseline, bounded initial implementation, regression gates and later phases.
 

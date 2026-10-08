@@ -1,0 +1,486 @@
+{
+  "connected-valid": {
+    "hero": "Connected & healthy",
+    "description": "BizHawk \u00b7 Pok\u00e9mon Platinum \u00b7 Party and PC monitoring current.",
+    "global": "LIVE RAM",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Monitoring",
+        "success"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Ready",
+        "success"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LIVE"
+  },
+  "connected-invalid": {
+    "hero": "Connection needs attention",
+    "description": "The emulator heartbeat is available; party data is stale or has a read warning.",
+    "global": "ATTENTION",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Invalid",
+        "warning"
+      ],
+      "pc": [
+        "Monitoring",
+        "success"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Ready",
+        "success"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LAST SNAPSHOT"
+  },
+  "connected-stale": {
+    "hero": "Connection needs attention",
+    "description": "The emulator heartbeat is available; party data is stale or has a read warning.",
+    "global": "ATTENTION",
+    "update": "LAST RAM UPDATE  \u00b7  7.0s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Stale",
+        "warning"
+      ],
+      "pc": [
+        "Monitoring",
+        "success"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Ready",
+        "success"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LAST SNAPSHOT"
+  },
+  "disconnected": {
+    "hero": "Waiting for BizHawk",
+    "description": "Connect the emulator to inspect live system health.",
+    "global": "DISCONNECTED",
+    "update": "LAST RAM UPDATE  \u00b7  Never",
+    "domain": "RAM DOMAIN  \u00b7  Unavailable",
+    "fields": {
+      "party": [
+        "Waiting",
+        "warning"
+      ],
+      "pc": [
+        "Unavailable",
+        "warning"
+      ],
+      "layout": [
+        "Unavailable",
+        "warning"
+      ],
+      "command": [
+        "Unverified",
+        "info"
+      ],
+      "connection": [
+        "Disconnected",
+        "warning"
+      ],
+      "game": [
+        "Unavailable",
+        "info"
+      ],
+      "acquisition": [
+        "Unavailable",
+        "info"
+      ],
+      "boxed": [
+        "\u2014",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": false,
+    "party-state": "WAITING"
+  },
+  "unknown-command": {
+    "hero": "Connected \u00b7 party current",
+    "description": "BizHawk \u00b7 Pok\u00e9mon Platinum. Review command and PC health below.",
+    "global": "LIVE RAM",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Monitoring",
+        "success"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Unverified",
+        "info"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LIVE"
+  },
+  "pending-command": {
+    "hero": "Connected \u00b7 party current",
+    "description": "BizHawk \u00b7 Pok\u00e9mon Platinum. Review command and PC health below.",
+    "global": "LIVE RAM",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Monitoring",
+        "success"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Waiting For Ack",
+        "info"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LIVE"
+  },
+  "stale-command": {
+    "hero": "Connected \u00b7 party current",
+    "description": "BizHawk \u00b7 Pok\u00e9mon Platinum. Review command and PC health below.",
+    "global": "LIVE RAM",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Monitoring",
+        "success"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Ack Stale",
+        "warning"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LIVE"
+  },
+  "pc-unavailable": {
+    "hero": "Connected \u00b7 party current",
+    "description": "BizHawk \u00b7 Pok\u00e9mon Platinum. Review command and PC health below.",
+    "global": "LIVE RAM",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Connecting",
+        "warning"
+      ],
+      "layout": [
+        "Unresolved",
+        "warning"
+      ],
+      "command": [
+        "Ready",
+        "success"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LIVE"
+  },
+  "pc-discovering": {
+    "hero": "PC resolver is recovering",
+    "description": "Party data is current. PC monitoring is waiting for layout validation and its baseline.",
+    "global": "RECOVERING",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Discovering PC layout",
+        "warning"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Ready",
+        "success"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": false,
+    "party-state": "LIVE"
+  },
+  "pc-baseline": {
+    "hero": "PC resolver is recovering",
+    "description": "Party data is current. PC monitoring is waiting for layout validation and its baseline.",
+    "global": "RECOVERING",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Establishing baseline",
+        "warning"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Ready",
+        "success"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "",
+    "rediscover": true,
+    "party-state": "LIVE"
+  },
+  "pc-failed": {
+    "hero": "Connected \u00b7 party current",
+    "description": "BizHawk \u00b7 Pok\u00e9mon Platinum. Review command and PC health below.",
+    "global": "LIVE RAM",
+    "update": "LAST RAM UPDATE  \u00b7  0.2s ago",
+    "domain": "RAM DOMAIN  \u00b7  Main RAM",
+    "fields": {
+      "party": [
+        "Valid",
+        "success"
+      ],
+      "pc": [
+        "Monitoring paused",
+        "warning"
+      ],
+      "layout": [
+        "Resolved",
+        "success"
+      ],
+      "command": [
+        "Ready",
+        "success"
+      ],
+      "connection": [
+        "Connected",
+        "success"
+      ],
+      "game": [
+        "Pok\u00e9mon Platinum",
+        "info"
+      ],
+      "acquisition": [
+        "Yes",
+        "info"
+      ],
+      "boxed": [
+        "2",
+        "info"
+      ]
+    },
+    "recovery": "Retry current layout.",
+    "rediscover": true,
+    "party-state": "LIVE"
+  }
+}

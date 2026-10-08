@@ -833,7 +833,7 @@ QPushButton[buttonRole="offlineRetry"] { background: #202a3d; border: 1px solid 
 QPushButton[buttonRole="offlineRetry"]:hover { background: #29374e; border-color: #7193c6; }
 QLabel#connectionBadge { font-family: "DM Mono"; font-size: 10px; padding: 0; border-radius: 1px; }
 QLabel#connectionBadge[connectionState="disconnected"] { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #19121a,stop:1 #100e14); border: 1px solid #50303c; color: #ff7185; }
-QLabel#connectionBadge[connectionState="connected"] { background: #101c19; border: 1px solid #2b5846; color: #57dda2; }
+QLabel#connectionBadge[connectionState="connected"] { background: #0d1717; border: 1px solid #2b5846; color: #57dda2; }
 QPushButton[buttonRole="compactToggle"] { background: #111720; border: 1px solid #26313f; border-radius: 1px; font-family: "Manrope"; font-size: 12px; padding: 0 12px; min-height: 0; }
 QPushButton[buttonRole="compactToggle"]:disabled { color: #46505f; background: #0c1118; border-color: #171e29; }
 QPushButton#settingsCog { background: #111720; border: 1px solid #2b3543; border-radius: 1px; padding: 0; min-height: 0; }

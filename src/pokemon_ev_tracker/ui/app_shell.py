@@ -338,7 +338,7 @@ class AppShell(QWidget):
         badge = self.backend_status.compact_label
         badge.setProperty("iconOnly", icons_only)
         badge.setFixedHeight(30 if self._compact else 31 if icons_only else 42)
-        badge.setFixedWidth(31 if icons_only else 110 if self._connected or width <= 760 else 232)
+        badge.setFixedWidth(31 if icons_only else 110 if width <= 760 else 140 if self._connected else 232)
         self.backend_status.setFixedWidth(badge.width())
         badge.setProperty("hideDetail", not self._compact and width <= 760)
         badge.update()
