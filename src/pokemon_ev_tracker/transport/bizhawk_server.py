@@ -20,11 +20,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pokemon_ev_tracker.core import pc_discovery_recovery
+from pokemon_ev_tracker.core.pc_discovery_recovery import (
+    RecoveryKind,
+    RecoveryTransition,
+)
 from pokemon_ev_tracker.core.pc_discovery_status import pc_discovery_failure_message
 from pokemon_ev_tracker.games.platinum.pc_discovery import (
     INSPECTION_AFTER_BYTES,
     INSPECTION_BEFORE_BYTES,
-    PC_DISCOVERY_STALL_SECONDS,
     PLATINUM_PARTY_POINTER_ADDRESS,
     RECORDS_SIZE,
     PCStorageDiscoveryAccumulator,
@@ -48,8 +52,9 @@ NDS_MAIN_RAM_SIZE = 0x400000
 PC_BOX_RECORD_SIZE = 136
 PC_BOX_RECORDS_OFFSET = 4
 PC_DISCOVERY_CHUNK_MAX = 0x1000
-PC_DISCOVERY_RETRY_TIMEOUT_SECONDS = 2.0
-PC_DISCOVERY_RETRY_LIMIT = 3
+PC_DISCOVERY_RETRY_LIMIT = pc_discovery_recovery.PC_DISCOVERY_RETRY_LIMIT
+PC_DISCOVERY_RETRY_TIMEOUT_SECONDS = pc_discovery_recovery.PC_DISCOVERY_RETRY_TIMEOUT_SECONDS
+PC_DISCOVERY_STALL_SECONDS = pc_discovery_recovery.PC_DISCOVERY_STALL_SECONDS
 PC_DISCOVERY_STATUS_LOG_INTERVAL_SECONDS = 1.0
 PC_CACHE_CONFIRMATION_TIMEOUT_SECONDS = 3.0
 PC_SAVE_COPY_RECORD_OFFSETS = (0x0C104, 0x4C104)
@@ -3092,34 +3097,22 @@ class BizHawkDebugServer:
         chunk_index: int,
         source: str,
     ) -> bool:
-        if chunk_index in accumulator.retry_in_flight:
-            return True
-        attempts = accumulator.retry_attempts.get(chunk_index, 0)
-        if attempts >= PC_DISCOVERY_RETRY_LIMIT:
-            return False
-        command = f"PC_RETRY_DISCOVERY_CHUNK|{accumulator.scan_id}|{chunk_index}\n"
+        return accumulator.recovery.request_retry(
+            accumulator.scan_id, chunk_index, source, self._send_pc_discovery_retry,
+        )
+
+    def _send_pc_discovery_retry(
+        self, scan_id: str, chunk_index: int, source: str,
+    ) -> str | None:
+        command = f"PC_RETRY_DISCOVERY_CHUNK|{scan_id}|{chunk_index}\n"
         routes = (source, "file" if source == "tcp" else "tcp")
-        route_used = None
         for route in routes:
             sent = (
                 route == "tcp" and self._send_tcp_command(command)
             ) or (route == "file" and self._write_command_file(command))
             if sent:
-                route_used = route
-                break
-        if route_used is None:
-            return False
-        accumulator.retry_attempts[chunk_index] = attempts + 1
-        accumulator.retry_in_flight.add(chunk_index)
-        accumulator.retry_requested_at[chunk_index] = time.monotonic()
-        LOGGER.warning(
-            "Requesting retransmission of PC discovery chunk: scan=%s chunk=%d attempt=%d via=%s",
-            accumulator.scan_id,
-            chunk_index,
-            attempts + 1,
-            route_used,
-        )
-        return True
+                return route
+        return None
 
     def _acknowledge_pc_discovery_scan(self, scan_id: str, source: str) -> None:
         command = f"PC_ACK_DISCOVERY_SCAN|{scan_id}\n"
@@ -3179,52 +3172,34 @@ class BizHawkDebugServer:
                     progress["producer_status"],
                 )
                 accumulator.last_transport_log_at = now
-            expired = [
-                index
-                for index in accumulator.retry_in_flight
-                if now - accumulator.retry_requested_at.get(index, now)
-                >= PC_DISCOVERY_RETRY_TIMEOUT_SECONDS
-            ]
-            for chunk_index in sorted(expired):
-                accumulator.retry_in_flight.discard(chunk_index)
-                accumulator.retry_requested_at.pop(chunk_index, None)
-                if accumulator.retry_attempts.get(chunk_index, 0) >= PC_DISCOVERY_RETRY_LIMIT:
-                    self._fail_missing_pc_discovery_chunk_locked(
-                        accumulator, chunk_index, "retransmission timed out"
-                    )
-                    return
-                if self._request_pc_discovery_chunk_retry(
-                    accumulator, chunk_index, accumulator.source
-                ):
-                    self._set_pc_discovery_retry_progress(accumulator, chunk_index)
-                else:
-                    self._fail_missing_pc_discovery_chunk_locked(
-                        accumulator, chunk_index, "retry request could not be sent"
-                    )
+            for transition in accumulator.recovery.expired_retries(
+                accumulator, now, self._send_pc_discovery_retry,
+            ):
+                self._apply_pc_recovery_transition_locked(accumulator, transition)
+                if transition.kind is RecoveryKind.MISSING_FAILED:
                     return
 
             if self._pc_discovery_scan is not accumulator:
                 return
-            retry_active = bool(accumulator.retry_in_flight)
-            stalled_for = now - accumulator.last_chunk_received_at
-            if not retry_active and stalled_for >= PC_DISCOVERY_STALL_SECONDS:
-                missing_index = accumulator.first_missing_chunk_index()
-                if missing_index is not None:
-                    if self._request_pc_discovery_chunk_retry(
-                        accumulator, missing_index, accumulator.source
-                    ):
-                        self._set_pc_discovery_retry_progress(accumulator, missing_index)
-                    else:
-                        self._fail_missing_pc_discovery_chunk_locked(
-                            accumulator,
-                            missing_index,
-                            "retry limit reached or request failed",
-                        )
-                elif not accumulator.end_received:
-                    self._pc_discovery_progress = {
-                        **accumulator.progress(),
-                        "status": "stalled",
-                    }
+            transition = accumulator.recovery.stalled(
+                accumulator, now, self._send_pc_discovery_retry,
+            )
+            if transition is not None:
+                self._apply_pc_recovery_transition_locked(accumulator, transition)
+
+    def _apply_pc_recovery_transition_locked(
+        self, accumulator: PCStorageDiscoveryAccumulator, transition: RecoveryTransition,
+    ) -> None:
+        if transition.kind is RecoveryKind.RETRYING:
+            assert transition.chunk_index is not None
+            self._set_pc_discovery_retry_progress(accumulator, transition.chunk_index)
+        elif transition.kind is RecoveryKind.MISSING_FAILED:
+            assert transition.chunk_index is not None and transition.reason is not None
+            self._fail_missing_pc_discovery_chunk_locked(
+                accumulator, transition.chunk_index, transition.reason,
+            )
+        elif transition.kind is RecoveryKind.STALLED:
+            self._pc_discovery_progress = {**accumulator.progress(), "status": "stalled"}
 
     def _set_pc_discovery_retry_progress(
         self, accumulator: PCStorageDiscoveryAccumulator, chunk_index: int
@@ -3304,43 +3279,25 @@ class BizHawkDebugServer:
         accumulator: PCStorageDiscoveryAccumulator,
         source: str,
     ) -> None:
-        expected_count = accumulator.expected_chunk_count
-        expected_bytes = accumulator.expected_byte_count
-        if not accumulator.end_received or expected_count is None:
-            return
-        missing = sorted(
-            set(range(expected_count)) - accumulator.received_chunk_indexes
+        transition = accumulator.recovery.completion(
+            accumulator, source, self._send_pc_discovery_retry,
         )
-        accumulator.missing_chunk_indexes = set(missing)
-        if missing:
-            missing_index = missing[0]
-            if self._request_pc_discovery_chunk_retry(
-                accumulator, missing_index, source
-            ):
-                self._set_pc_discovery_retry_progress(accumulator, missing_index)
-            else:
-                self._fail_missing_pc_discovery_chunk_locked(
-                    accumulator, missing_index, "retry limit reached or request failed"
-                )
+        if transition is None:
             return
-        if (
-            accumulator.received_chunk_indexes != set(range(expected_count))
-            or expected_bytes != accumulator.total_bytes
-            or len(accumulator.data) != expected_bytes
-        ):
+        if transition.kind is RecoveryKind.COUNTS_FAILED:
+            assert transition.reason is not None
             self._fail_active_pc_discovery_locked(
-                accumulator,
-                source,
-                "Discovery transport error: end packet counts do not match the "
-                "received chunk indexes and bytes.",
+                accumulator, source, transition.reason,
                 (accumulator.completion_event or {}).get("frame"),
             )
-            return
-        self._begin_pc_discovery_analysis_locked(
-            accumulator,
-            accumulator.completion_source or source,
-            (accumulator.completion_event or {}).get("frame"),
-        )
+        elif transition.kind is RecoveryKind.READY:
+            self._begin_pc_discovery_analysis_locked(
+                accumulator,
+                accumulator.completion_source or source,
+                (accumulator.completion_event or {}).get("frame"),
+            )
+        else:
+            self._apply_pc_recovery_transition_locked(accumulator, transition)
 
     def _record_pc_discovery_event(self, payload: dict[str, Any], source: str) -> None:
         message_type = payload.get("type")

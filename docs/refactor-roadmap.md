@@ -1148,3 +1148,162 @@ decoding while preserving its completion/position locking and public dispatch
 interface. Do not automatically start D2 or extract the full discovery controller.
 Live Lua/TCP/fallback reconnect and active-scan smoke checks remain manual validation
 work. The Lua reader, game-provider contracts and user save data were not modified.
+
+
+## Phase D2 audit and selected boundary (before integration)
+
+The explicit D2 discovery request supersedes D1's stream-framing suggestion.
+The full discovery/cache/inspection workflow is too intertwined for one safe
+extraction: request/announcement validation, scan state, worker finalization,
+cache command acknowledgement and several auxiliary searches share the server's
+existing discovery lock. Select missing-chunk recovery and exact completeness
+gating instead. This is a per-scan coordinator, not a full resolver rewrite.
+
+Lifecycle/state audit:
+
+- Server dispatches validated broad/manual-anchor/session-layout commands through
+  existing TCP/file routes. Lua announces ranges, produces bounded hex chunks,
+  retains retransmit cache and emits end counts. ACK releases its retry cache.
+- Server validates announcements, IDs, encoding, chunk sizes and end-count bounds
+  before giving bytes to the Platinum accumulator. Accumulator orders/deduplicates
+  chunks and performs record/checksum/party-range analysis. Later chunks prove gaps;
+  an unproduced next chunk is never considered missing before an end announcement.
+- Server currently owns retry routing, attempts/deadlines via accumulator fields,
+  timeout/stall checks, progress publication and exact index/byte completion gate.
+  All those operations execute under `_pc_discovery_lock`; send operations retain
+  existing client/command-file synchronization. Failed delivery spends no attempt.
+- Only exact completion starts the existing daemon analysis worker. Platinum
+  finalize validates identity, trainer/save structures, occupied/empty records and
+  manual anchors; incomplete scans cannot reach it. Superseded worker identity is
+  checked under the discovery lock before publication. Snapshot publication uses
+  `_lock`; cache command queue uses `_command_file_lock`. No lock/order changes.
+- Server owns scan cancellation, Lua-run invalidation, cached-layout command/ACK
+  readiness, retryable cache timeout and diagnostic result schemas. Data source
+  decodes confirmed PC payloads, freshness, stable sightings and stream identity;
+  C5 acquisition gates remain unchanged. Heartbeat freshness alone confirms none
+  of these. SRAM/save-offset/identity/pointer searches remain distinct workflows.
+
+After extraction each accumulator owns one `PCDiscoveryRecovery`; compatibility
+retry collections reference that owner, with no duplicate state. A narrow command
+sender returns accepted route, and immutable transitions drive existing synchronous
+server effects. Cancellation/replacement drops the scan and its recovery together.
+Generic recovery interprets no RAM addresses, checksums or game offsets. Transport
+retains IO, locks, progress schemas, event validation, worker scheduling and cache
+publication. Game analysis is deliberately not moved into generic recovery.
+
+Pre-integration verification: focused 166 passed in 9.04s; full 991 passed in
+149.95s. Nine added characterization cases passed in 0.14s, covering ordered route
+fallback, in-flight deduplication, no state commit on failed send, exact completion
+counts/source/frame, ordered expiry and stop-on-failure. Existing extensive traces
+cover layout validation, retries, cancellation, session/cache transitions and IO.
+
+
+## Phase D2: per-scan recovery coordination and completeness gating
+
+Implemented D2 only. `core/pc_discovery_recovery.py` is Qt-/game-/transport-free
+and defines `PCDiscoveryRecovery`, a minimal structural `ChunkScan` input contract,
+and frozen `RecoveryTransition`/`RecoveryKind` outputs. One accumulator owns one
+coordinator. It owns attempts, in-flight indexes and deadlines; received chunks
+clear only their own pending retry, preserving attempt history. The accumulator's
+existing mutable collection accessors are references to these same collections.
+No authoritative state is copied or cached twice. Its former internal dataclass
+retry-constructor fields become coordinator-owned collections; no repository
+constructor supplied them, and external server/data-source interfaces are unchanged.
+
+Extracted behavior: retry deduplication/limit accounting; successful-send commit;
+sorted deadline expiry and stop-on-failure; stall detection using only proven gaps;
+end-received/index/byte completeness checks. The clock is explicitly injectable.
+The sender accepts only scan ID, index and source and returns the accepted route.
+It receives no server object. A lazy synchronous transition sequence preserves
+send/progress/failure ordering without pre-sending later retries after a failure.
+Failure reasons and visible retry wording are unchanged (the warning logger now
+belongs to the recovery module). No new timer, thread, lock or background work.
+
+Server delegates `_request_pc_discovery_chunk_retry`, deadline polling and
+`_try_finish_pc_discovery_locked`; it performs the existing synchronous progress,
+failure, ACK and analysis effects. Retained transport route order, delivery paths,
+lock scopes, cancellation/reset behavior and the superseded-analysis identity
+check. Coordinator disposal follows existing accumulator replacement/removal.
+Game code retains ordering/deduplication, missing-index evidence, scan bytes,
+record/checksum interpretation, trainer/save matching, party exclusion, manual
+anchor/empty/full PC validation and confirmed cache result semantics.
+
+AST server class span: **4,999 -> 4,951** lines (85 -> 87 methods; added narrow
+sender and transition application). The three delegated methods total **152 ->
+77** lines. Meaningful reduction is removal of retry state transitions and analysis
+eligibility policy from the IO owner, not a claimed large server rewrite.
+
+### Regression coverage and verification
+
+Added **37 cases**: nine characterization cases before integration, two more
+server integration cases, and 26 coordinator-only cases. Independent tests require
+no server, Qt, emulator or game decoder. They cover exact timeout/stall thresholds,
+unknown retry timestamps, limits, failed delivery, in-flight deduplication, retained
+attempt history, expiry ordering/stop-on-failure, absence of speculative future
+chunk retries, exact completion counts, route source, owner isolation and no RAM
+retention. Integration covers TCP/file route fallback, post-delivery commit,
+exact source/frame forwarding, chunk receipt owner aliases, and deterministic
+session reset while analysis is blocked: the obsolete result is never published.
+
+Existing unchanged tests cover successful/empty/full structures, occupied/invalid
+checksums, party exclusion and trainer/session identity, manual anchor fallback,
+chunk ordering/conflicting duplicates/end-before-data, retry exhaustion, malformed
+JSON recovery, cancellation and stalled producer recovery, Lua-run invalidation,
+cache confirmation/timeout/fast ACK races, TCP fragmentation/reconnect/concurrent
+reception and fallback startup/partial/truncation. No assertions were weakened.
+
+Before: focused **166 passed in 9.04s**, full **991 passed in 149.95s**; Ruff,
+diff and source/wheel builds passed. After: independent/new integration selection
+**37 passed in 0.15s**, focused **203 passed in 10.31s**. Complete suite **1,028 passed in 169.58s**. Ruff and git diff checks passed;
+source and wheel builds passed both before and after extraction.
+
+### Performance and retention
+
+`benchmarks/pc_discovery_recovery.py` compares captured pre-D2 server *and*
+accumulator modules against current code. Seven rounds of five workflows, paired
+before/after runs without concurrent tests. Results: `benchmarks/results/
+pc-discovery-before.json` and `pc-discovery-after.json`. Fixtures exercise eight
+normal chunks, 256 chunks (128 KiB), 32 distinct gap/retry/recovery pairs, and a
+complete manual-anchor scan with a checksum-valid occupied record, 539 empty slots
+and available non-overlapping party range. Successful finalization is asserted.
+The benchmark sends protocol dictionaries through the existing event handler;
+analysis runs synchronously only for the finalization fixture. It excludes JSON
+parsing, socket/file IO, contention and actual worker scheduling. It does not
+represent a full 4 MiB automatic layout scan or real-emulator latency.
+
+| Workflow median | Before | After |
+| --- | --- | --- |
+| Normal event stream | 1.2729 ms | 1.2372 ms |
+| 256-chunk stream | 40.3170 ms | 38.8650 ms |
+| 32 gap recoveries | 9.8871 ms | 10.2864 ms |
+| Successful anchor finalization | 10.4302 ms | 10.6383 ms |
+
+Ranges overlap; no performance improvement is claimed. Retry-heavy median adds
+0.3993 ms per trace, finalization 0.2081 ms. Command counts remain 0/0/32/1.
+Tracemalloc retained bytes before/after: normal 19,267/19,367; large
+166,856/166,956; retry 54,791/54,887; finalization 311,743/311,839. This is
+approximately 96-100 additional bytes per active scan. Peak bytes:
+27,622/27,722; 311,162/311,326; 93,402/93,498; 465,848/465,944. After dropping
+the scan, retained memory is unchanged within four bytes (11,938/11,942 for
+normal/large; 15,761 both retry; 36,508 both finalization). Existing server result
+payloads are intentionally still retained; these measurements do not imply all
+application memory is released. No scanning algorithm or allocation optimization.
+
+### Remaining boundary and recommended next slice
+
+The full resolver/session/cache controller is deliberately deferred: server still
+owns announcement validation, active-scan identity, diagnostic progress, cache
+command/confirmation timeout and publication, inspection/identity/pointer/SRAM/
+save-offset workflows and analysis scheduling. Coordinator completeness means
+transport-ready for game analysis, **not** a validated or empty PC. Only existing
+game validation and emulator cache confirmation establish authoritative monitoring.
+
+Recommended next bounded slice: characterize and extract game-specific discovery
+announcement range/party-context validation into Platinum helpers, keeping active
+session selection, locks, command routing and publication in the server. This
+removes memory offsets from transport before a larger session-cache controller.
+Stream framing remains a separate candidate. Do not proceed automatically to D3.
+Live emulator discovery/reconnect/cache smoke testing remains manual; this phase
+uses deterministic traces and existing automated safeguards. UI, protocol/Lua,
+provider contracts, persistence, freshness/acquisition coordination and independent
+backup scheduling are unchanged.

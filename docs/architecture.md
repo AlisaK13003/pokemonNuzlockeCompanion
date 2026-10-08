@@ -109,9 +109,20 @@ families through pure helpers and a frozen `ParsedLine`. It preserves standard
 JSON acceptance, original/normalized text and parser error details; malformed
 family/integer hints do not authorize recovery. BizHawkDebugServer retains framing,
 socket/file IO, all locks, publication timestamps/byte counts, commands, lifecycle,
-active-scan validation, retry/timeout decisions and game-specific discovery work.
+active-scan validation, progress publication and game-specific discovery work.
 Classification chooses existing explicit dispatch branches, without a routing bus
 or new authoritative transport state.
+
+`core/pc_discovery_recovery.py` owns per-scan retry attempts, in-flight indexes
+and deadlines, plus expiry/stall decisions and the exact index/byte completion
+gate. The Platinum accumulator owns one recovery coordinator and exposes its
+existing retry collections as references, not copies. It still owns chunk ordering
+and all record/RAM interpretation. A narrow sender reports successful transport
+delivery; immutable transitions are applied synchronously under the server's
+existing discovery lock. The coordinator owns no sockets, files, locks, threads,
+snapshots or RAM buffers. Server retains active-scan lifecycle, protocol validation,
+result publication, analysis-worker scheduling and confirmed session-cache handoff.
+Cancellation/replacement discards the old scan and recovery together.
 
 See [the first engineering audit and measurements](refactor-roadmap.md) for the
 baseline, bounded initial implementation, regression gates and later phases.

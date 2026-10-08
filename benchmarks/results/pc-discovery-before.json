@@ -1,0 +1,66 @@
+{
+  "normal": {
+    "median_ms": 1.2729,
+    "round_ms": [
+      1.2741,
+      1.263,
+      1.3106,
+      1.2827,
+      1.2696,
+      1.2481,
+      1.2729
+    ],
+    "commands": 0,
+    "retained_bytes": 19267,
+    "peak_bytes": 27622,
+    "after_scan_release_bytes": 11938
+  },
+  "large_stream": {
+    "median_ms": 40.317,
+    "round_ms": [
+      40.2956,
+      41.0388,
+      42.7141,
+      38.6389,
+      40.317,
+      43.7446,
+      38.2818
+    ],
+    "commands": 0,
+    "retained_bytes": 166856,
+    "peak_bytes": 311162,
+    "after_scan_release_bytes": 11938
+  },
+  "retry_heavy": {
+    "median_ms": 9.8871,
+    "round_ms": [
+      9.9049,
+      9.8831,
+      9.8796,
+      9.8871,
+      10.3923,
+      10.1594,
+      9.8524
+    ],
+    "commands": 32,
+    "retained_bytes": 54791,
+    "peak_bytes": 93402,
+    "after_scan_release_bytes": 15761
+  },
+  "finalization": {
+    "median_ms": 10.4302,
+    "round_ms": [
+      10.5885,
+      10.4302,
+      10.3774,
+      10.6163,
+      10.3922,
+      10.5247,
+      10.423
+    ],
+    "commands": 1,
+    "retained_bytes": 311743,
+    "peak_bytes": 465848,
+    "after_scan_release_bytes": 36508
+  }
+}

@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import Any
 
+from pokemon_ev_tracker.core.pc_discovery_recovery import (
+    PC_DISCOVERY_STALL_SECONDS,
+    PCDiscoveryRecovery,
+)
 from pokemon_ev_tracker.pokemon.gen4.structure import decode_box_pokemon
 
 MAIN_RAM_BASE = 0x02000000
@@ -25,7 +29,6 @@ MAX_CHUNK_BYTES = 0x1000
 MAX_BROAD_HITS = 256
 MAX_PC_REGION_INVALID_RECORDS = 0
 MIN_SESSION_LAYOUT_OCCUPIED_RECORDS = 1
-PC_DISCOVERY_STALL_SECONDS = 2.0
 PLATINUM_PARTY_POINTER_ADDRESS = 0x02101D2C
 # Historical failed hypothesis retained for old diagnostic payload decoding only.
 PLATINUM_RUNTIME_PC_HEADER_OFFSET = 0x19EB4
@@ -99,9 +102,7 @@ class PCStorageDiscoveryAccumulator:
     last_chunk_received_at: float = field(default_factory=time.monotonic)
     last_transport_log_at: float = field(default_factory=time.monotonic)
     pending_chunks: dict[int, tuple[int, bytes, int]] = field(default_factory=dict)
-    retry_attempts: dict[int, int] = field(default_factory=dict)
-    retry_in_flight: set[int] = field(default_factory=set)
-    retry_requested_at: dict[int, float] = field(default_factory=dict)
+    recovery: PCDiscoveryRecovery = field(default_factory=PCDiscoveryRecovery, init=False)
     completion_event: dict[str, Any] | None = None
     completion_source: str | None = None
     _record_scan_offset: int = 0
@@ -110,6 +111,18 @@ class PCStorageDiscoveryAccumulator:
     _active_party_ranges: tuple[tuple[int, int, int], ...] = field(
         default=(), init=False, repr=False
     )
+
+    @property
+    def retry_attempts(self) -> dict[int, int]:
+        return self.recovery.attempts
+
+    @property
+    def retry_in_flight(self) -> set[int]:
+        return self.recovery.in_flight
+
+    @property
+    def retry_requested_at(self) -> dict[int, float]:
+        return self.recovery.requested_at
 
     def __post_init__(self) -> None:
         if not self._party_range_available():
@@ -256,8 +269,7 @@ class PCStorageDiscoveryAccumulator:
                 and end <= len(self.data)
                 and self.data[offset:end] == chunk
             ):
-                self.retry_in_flight.discard(chunk_index)
-                self.retry_requested_at.pop(chunk_index, None)
+                self.recovery.received(chunk_index)
                 return "duplicate"
             raise ValueError(
                 f"Discovery transport error: duplicate chunk {chunk_index} differs "
@@ -286,8 +298,7 @@ class PCStorageDiscoveryAccumulator:
         while self.received_chunk_count in self.pending_chunks:
             next_index = self.received_chunk_count
             pending_offset, pending_data, pending_count = self.pending_chunks.pop(next_index)
-            self.retry_in_flight.discard(next_index)
-            self.retry_requested_at.pop(next_index, None)
+            self.recovery.received(next_index)
             self.append_chunk(
                 pending_offset,
                 pending_data,
@@ -301,8 +312,7 @@ class PCStorageDiscoveryAccumulator:
         self.received_chunk_indexes.add(chunk_index)
         self.highest_chunk_index_seen = max(self.highest_chunk_index_seen, chunk_index)
         self.last_chunk_received_at = time.monotonic()
-        self.retry_in_flight.discard(chunk_index)
-        self.retry_requested_at.pop(chunk_index, None)
+        self.recovery.received(chunk_index)
 
     def _refresh_missing_chunk_indexes(self) -> None:
         last_expected = (
