@@ -134,6 +134,11 @@ python -m build
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development practices and [game provider architecture](docs/game_provider_architecture.md) for the integration boundary and new-game checklist. Feature details are in the [Training](docs/ev_training_preferences.md), [move catalog](docs/gen4_move_catalog.md), and [Friendship Walk](docs/friendship_walk_eta.md) notes.
 
+The [engineering refactor roadmap](docs/refactor-roadmap.md) documents architecture
+findings, baseline failures, measured fixture performance and the first bounded
+presentation extraction. Run the optional benchmark with
+`python benchmarks/runtime_fixtures.py --output .test-scratch/runtime.json`.
+
 ## License and assets
 
 Original project source code is licensed under the [MIT License](LICENSE). Bundled Pokémon sprites and item artwork have separate ownership and terms; see [third-party notices](THIRD_PARTY_NOTICES.md). This unofficial project is not affiliated with Nintendo, The Pokémon Company, or Game Freak.

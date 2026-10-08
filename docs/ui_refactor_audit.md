@@ -72,6 +72,12 @@ hidden as a transitional formatting adapter for established formatting, targets,
 and sprite behavior; they are never mounted as visible workspaces. The new views
 consume their presentation fields, avoiding a rewrite of tested runtime paths.
 
+Engineering follow-up (2026-10-08): stat/checksum, metadata and move projection now
+live in `ui/party_presentation.py`, with per-card equivalence guards. The compatibility
+cards, field names, callbacks, PID-target formatting and movie ownership remain.
+This extraction does not remove the adapters or redesign the visible views. See
+the [refactor roadmap](refactor-roadmap.md) for measured scope and later work.
+
 ## Files created or modified
 
 Created presentation modules under `src/pokemon_ev_tracker/ui/`:

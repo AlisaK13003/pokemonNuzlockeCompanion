@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from copy import deepcopy
 from dataclasses import dataclass, replace
 
 from pokemon_ev_tracker.data_sources.base import DataSourceSnapshot, GameDataSource
@@ -53,8 +54,16 @@ class BizHawkRamDataSource(GameDataSource):
     def __init__(self, server: BizHawkDebugServer | None = None, profile=PLATINUM_PROFILE) -> None:
         self.server = server or BizHawkDebugServer()
         self.profile = profile
-        self._display_stream_identity = None
         self._last_good_party_by_pid = {}
+        self._last_good_party_times: dict[int, float] = {}
+        self._party_context = None
+        self._party_profile = None
+        self._party_decoder = None
+        self._party_last_frame = None
+        self._party_decode_key = object()
+        self._party_decode_state: PartyState | None = None
+        self._party_display_key = None
+        self._party_display_state: PartyState | None = None
         self._battle_payload_cache = object()
         self._battle_battlers_cache: tuple[BattleBattler, ...] = ()
         self._pc_storage_payload_cache = object()
@@ -78,6 +87,32 @@ class BizHawkRamDataSource(GameDataSource):
 
     def stop(self) -> None:
         self.server.stop()
+        self._reset_party_reuse()
+
+    def _reset_party_reuse(self) -> None:
+        """Retain at most one decode/display result and six last-good records."""
+        self._party_decode_key = object()
+        self._party_decode_state = None
+        self._party_display_key = None
+        self._party_display_state = None
+        self._last_good_party_by_pid.clear()
+        self._last_good_party_times.clear()
+
+    def _prepare_party_context(self, party_payload) -> None:
+        payload = party_payload.payload if party_payload is not None else {}
+        context = (getattr(party_payload, "source", None), *(payload.get(key) for key in (
+            "run_id", "lua_run_id", "rom_session_identity", "core", "domain", "pointer_value")))
+        frame = payload.get("frame")
+        rollback = (isinstance(frame, int) and isinstance(self._party_last_frame, int)
+                    and frame < self._party_last_frame)
+        decoder = self.profile.party_decoder
+        if (context != self._party_context or self.profile is not self._party_profile
+                or decoder != self._party_decoder or rollback or party_payload is None):
+            self._reset_party_reuse()
+        self._party_context = context
+        self._party_profile = self.profile
+        self._party_decoder = decoder
+        self._party_last_frame = frame
 
     def request_coordinate_capture(
         self, capture_id: str, label: str, start_offset: int, length: int
@@ -348,6 +383,9 @@ class BizHawkRamDataSource(GameDataSource):
             if callable(sram_search_status_reader)
             else {"status": "idle"}
         )
+        connected = self.server.is_connected()
+        if not connected:
+            self._reset_party_reuse()
         party_state = self._decode_party_payload(party_payload)
         display_party_state = self._stabilize_display_party(party_state, party_payload)
         battle_battlers = self._decode_battle_battlers(party_payload)
@@ -377,7 +415,7 @@ class BizHawkRamDataSource(GameDataSource):
         )
         return DataSourceSnapshot(
             backend_name=self.backend_name,
-            connected=self.server.is_connected(),
+            connected=connected,
             details={
                 "host": self.server.host,
                 "port": self.server.port,
@@ -595,16 +633,29 @@ class BizHawkRamDataSource(GameDataSource):
     def _stabilize_display_party(
         self, party_state: PartyState | None, party_payload
     ) -> PartyState | None:
+        self._prepare_party_context(party_payload)
         if party_state is None:
             return None
 
-        payload = party_payload.payload if party_payload is not None else {}
-        stream_identity = tuple(
-            payload.get(key) for key in ("run_id", "core", "domain", "pointer_value")
-        )
-        if stream_identity != self._display_stream_identity:
-            self._display_stream_identity = stream_identity
-            self._last_good_party_by_pid.clear()
+        now = time.monotonic()
+        lifetime = getattr(self.server, "stale_after_seconds", 5.0)
+        expired = [pid for pid, sampled_at in self._last_good_party_times.items()
+                   if max(0.0, now - sampled_at) > lifetime]
+        for pid in expired:
+            self._last_good_party_times.pop(pid)
+            self._last_good_party_by_pid.pop(pid, None)
+        if expired:
+            self._party_display_key = None
+        received_at = getattr(party_payload, "received_at", None)
+        sampled_at = received_at if isinstance(received_at, (int, float)) else now
+        # Time is deliberately excluded from reuse, but expiration runs above on
+        # every poll. Missing timestamps (legacy callers) cannot refresh old data
+        # merely by polling the same state again.
+        key = (party_state, received_at)
+        if self._party_display_key is not None and (
+                self._party_display_key[0] is party_state
+                and self._party_display_key[1] == received_at):
+            return self._party_display_state
 
         if not party_state.party_count_valid or party_state.party_count is None:
             return party_state
@@ -620,6 +671,9 @@ class BizHawkRamDataSource(GameDataSource):
                 for pid, pokemon in self._last_good_party_by_pid.items()
                 if pid in checksummed_pids
             }
+            self._last_good_party_times = {
+                pid: timestamp for pid, timestamp in self._last_good_party_times.items()
+                if pid in checksummed_pids}
 
         display_members = []
         invalid_slots = []
@@ -636,7 +690,8 @@ class BizHawkRamDataSource(GameDataSource):
                     stale_slots.append(pokemon.slot)
                 continue
 
-            current = replace(pokemon, sample_stale=False, battle_stats_stale=False)
+            current = (replace(pokemon, sample_stale=False, battle_stats_stale=False)
+                       if pokemon.sample_stale or pokemon.battle_stats_stale else pokemon)
             if not pokemon.decoded.diagnostics.battle_stats_valid:
                 invalid_battle_slots.append(pokemon.slot)
                 has_sane_previous = (
@@ -668,7 +723,17 @@ class BizHawkRamDataSource(GameDataSource):
                 self._last_good_party_by_pid[pid] = current
             else:
                 self._last_good_party_by_pid[pid] = current
+                self._last_good_party_times[pid] = sampled_at
             display_members.append(current)
+
+        # Invalid tails must never renew the lifetime of sane battle stats. A
+        # checksum-valid record without sane stats is also bounded and expires.
+        for pid in self._last_good_party_by_pid:
+            self._last_good_party_times.setdefault(pid, sampled_at)
+        while len(self._last_good_party_by_pid) > 6:
+            oldest = min(self._last_good_party_times, key=self._last_good_party_times.get)
+            self._last_good_party_times.pop(oldest)
+            self._last_good_party_by_pid.pop(oldest)
 
         warnings = []
         if invalid_slots:
@@ -690,16 +755,36 @@ class BizHawkRamDataSource(GameDataSource):
                     f"Battle stats failed validation in slot(s) {slots}; level/HP withheld."
                 )
 
-        return replace(
-            party_state,
-            pokemon=tuple(display_members),
-            live_read_warning=" ".join(warnings) or None,
-        )
+        members = tuple(display_members)
+        result = (party_state if not warnings and members == party_state.pokemon else replace(
+            party_state, pokemon=members, live_read_warning=" ".join(warnings) or None))
+        self._party_display_key = key
+        self._party_display_state = result
+        return result
 
     def _decode_party_payload(self, party_payload) -> PartyState | None:
+        self._prepare_party_context(party_payload)
         if party_payload is None:
             return None
         payload = party_payload.payload
+        candidates = payload.get("party_candidates", [])
+        candidates = candidates if isinstance(candidates, (list, tuple)) else ()
+        # Compare only decoder inputs, including all candidate addresses/counts.
+        # Copy the small key so in-place edits to the protocol's mutable dict are
+        # detectable. Raw hex strings themselves are immutable and not copied.
+        key = (payload.get("raw_party_hex"), payload.get("party_address"),
+               payload.get("party_count"), tuple(
+                   (candidate.get("raw_party_hex"), candidate.get("address"),
+                    candidate.get("party_count"))
+                   for candidate in candidates if isinstance(candidate, dict)))
+        if key == self._party_decode_key:
+            return self._party_decode_state
+        result = self._decode_party_inputs(payload, candidates)
+        self._party_decode_key = deepcopy(key)
+        self._party_decode_state = result
+        return result
+
+    def _decode_party_inputs(self, payload, candidates) -> PartyState | None:
         raw_hex = payload.get("raw_party_hex")
         decoded_primary = None
         if isinstance(raw_hex, str) and raw_hex:
@@ -710,7 +795,7 @@ class BizHawkRamDataSource(GameDataSource):
             )
 
         decoded_candidates = []
-        for candidate in payload.get("party_candidates", []):
+        for candidate in candidates:
             if not isinstance(candidate, dict):
                 continue
             candidate_raw = candidate.get("raw_party_hex")

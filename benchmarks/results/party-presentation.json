@@ -1,0 +1,148 @@
+{
+  "before": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "qt_platform": "offscreen",
+    "live_bizhawk": false,
+    "startup_fixture_ms": 790.258,
+    "party_adapter_unchanged": {
+      "median_ms": 4.6675,
+      "round_ms": [
+        4.7235,
+        4.6531,
+        4.688,
+        4.617,
+        4.6675
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "full_ui_poll_unchanged": {
+      "median_ms": 6.5249,
+      "round_ms": [
+        6.504,
+        6.4429,
+        6.5249,
+        7.2401,
+        7.2628
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "profile_calls_30_polls": {
+      "resolve_move": 720,
+      "refresh_style": 7050,
+      "_refresh_tracker_stats_metadata": 180,
+      "_refresh_ram_party_debug": 30,
+      "_refresh_training_recommendations": 60
+    },
+    "party_decode_same_payload": {
+      "median_ms": 1.5306,
+      "round_ms": [
+        1.5306,
+        1.5359,
+        1.495,
+        1.5269,
+        1.5464
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "transport_party_line": {
+      "median_ms": 0.0091,
+      "round_ms": [
+        0.0106,
+        0.0108,
+        0.0091,
+        0.0072,
+        0.0091
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "pc_broad_4mib": {
+      "median_ms": 1228.7715,
+      "round_ms": [
+        1228.7715,
+        1221.9124,
+        1325.737
+      ],
+      "iterations": 1,
+      "rounds": 3
+    },
+    "pc_broad_peak_traced_bytes": 4322888
+  },
+  "after": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "qt_platform": "offscreen",
+    "live_bizhawk": false,
+    "startup_fixture_ms": 797.6875,
+    "party_adapter_unchanged": {
+      "median_ms": 4.1216,
+      "round_ms": [
+        4.3291,
+        4.0133,
+        4.1216,
+        3.9499,
+        4.1368
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "full_ui_poll_unchanged": {
+      "median_ms": 6.2991,
+      "round_ms": [
+        5.8988,
+        6.0103,
+        6.2991,
+        6.5175,
+        6.492
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "profile_calls_30_polls": {
+      "resolve_move": 0,
+      "refresh_style": 4710,
+      "_refresh_tracker_stats_metadata": 180,
+      "_refresh_ram_party_debug": 30,
+      "_refresh_training_recommendations": 60
+    },
+    "party_decode_same_payload": {
+      "median_ms": 1.4913,
+      "round_ms": [
+        1.51,
+        1.4913,
+        1.4633,
+        1.6583,
+        1.4605
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "transport_party_line": {
+      "median_ms": 0.0076,
+      "round_ms": [
+        0.0076,
+        0.0077,
+        0.0079,
+        0.0075,
+        0.0072
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "pc_broad_4mib": {
+      "median_ms": 1180.9333,
+      "round_ms": [
+        1163.6019,
+        1180.9333,
+        1279.1256
+      ],
+      "iterations": 1,
+      "rounds": 3
+    },
+    "pc_broad_peak_traced_bytes": 4322888
+  }
+}

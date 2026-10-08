@@ -43,7 +43,6 @@ from pokemon_ev_tracker.core.friendship_training import (
     FriendshipGoal,
     FriendshipWalkSessionStats,
 )
-from pokemon_ev_tracker.core.moves import PokemonMoveState, resolve_move
 from pokemon_ev_tracker.core.nuzlocke.acquisition import (
     PartyAcquisitionObserver,
     reconcile_initial_starter,
@@ -64,7 +63,6 @@ from pokemon_ev_tracker.games.registry import (
     default_game_provider,
     get_game_provider,
 )
-from pokemon_ev_tracker.pokemon.gen4.friendship import friendship_label
 from pokemon_ev_tracker.pokemon.gen4.structure import (
     HELD_ITEM_BOX_DATA_OFFSET,
     HELD_ITEM_RECORD_OFFSET,
@@ -98,6 +96,12 @@ from pokemon_ev_tracker.ui.notifications import NotificationCenter
 from pokemon_ev_tracker.ui.nuzlocke_view import NuzlockeView
 from pokemon_ev_tracker.ui.opponent_panel import CurrentOpponentPanel
 from pokemon_ev_tracker.ui.party_card import EV_STAT_LABELS, PartyCard
+from pokemon_ev_tracker.ui.party_presentation import (
+    apply_party_metadata,
+    apply_party_stats,
+    project_moves_text,
+    refresh_move_displays,
+)
 from pokemon_ev_tracker.ui.preferences_view import DisconnectedView, PreferencesView
 from pokemon_ev_tracker.ui.sprite_loader import (
     get_animated_sprite_size,
@@ -553,23 +557,10 @@ class MainWindow(QMainWindow):
         for card in self.tracker_party_cards.values():
             pid = card.get("pid")
             pokemon = card.get("pokemon")
-            decoded = getattr(pokemon, "decoded", None)
             definition_for_id = (
                 self.provider.move_catalog
                 if self.provider.capabilities.move_metadata else None)
-            if pokemon is not None and pokemon.checksum_valid and decoded is not None:
-                move_ids = getattr(decoded, "move_ids", ())
-                current_pps = getattr(decoded, "move_current_pps", ())
-                pp_ups = getattr(decoded, "move_pp_ups", ())
-                card["move_displays"] = tuple(
-                    resolve_move(
-                        PokemonMoveState(move_id, current_pps[index], pp_ups[index]),
-                        definition_for_id or (lambda _move_id: None),
-                    ) if index < len(current_pps) and index < len(pp_ups) else None
-                    for index, move_id in enumerate(move_ids[:4])
-                )
-            else:
-                card["move_displays"] = ()
+            refresh_move_displays(card, pokemon, definition_for_id)
             card["training_preference"] = (
                 self.training_preference_store.get(pid)
                 if pid is not None and card.get("pokemon") is not None else None
@@ -1915,62 +1906,7 @@ class MainWindow(QMainWindow):
             self._refresh_tracker_stats_metadata(card, pokemon)
 
             self._refresh_tracker_moves(card, pokemon)
-            stats = pokemon.current_stats
-            current_values = {
-                "hp": stats.max_hp if stats is not None else None,
-                "attack": stats.attack if stats is not None else None,
-                "defense": stats.defense if stats is not None else None,
-                "special_attack": stats.special_attack if stats is not None else None,
-                "special_defense": stats.special_defense if stats is not None else None,
-                "speed": stats.speed if stats is not None else None,
-            }
-            iv_values = {
-                "hp": pokemon.hp_iv,
-                "attack": pokemon.attack_iv,
-                "defense": pokemon.defense_iv,
-                "special_attack": pokemon.special_attack_iv,
-                "special_defense": pokemon.special_defense_iv,
-                "speed": pokemon.speed_iv,
-            }
-            for stat, value_label in card["stat_values"].items():
-                value = current_values[stat]
-                value_label.setText(str(value) if value is not None else "--")
-                card["iv_values"][stat].setText(
-                    str(iv_values[stat]) if pokemon.checksum_valid else "--"
-                )
-                nature_role = (
-                    "up"
-                    if stat != "hp" and stat == pokemon.nature_increased_stat
-                    else "down"
-                    if stat != "hp" and stat == pokemon.nature_decreased_stat
-                    else "neutral"
-                )
-                for widget in (card["stat_names"][stat], value_label):
-                    widget.setProperty("natureRole", nature_role)
-                    refresh_style(widget)
-            if pokemon.sample_stale and pokemon.battle_stats_stale:
-                card["checksum"].setText("Showing last valid record; level/HP may be stale")
-            elif pokemon.sample_stale:
-                card["checksum"].setText("Warning: showing last valid RAM sample")
-            elif pokemon.battle_stats_stale and pokemon.level is None:
-                card["checksum"].setText("Warning: invalid level/HP/stats withheld")
-            elif pokemon.battle_stats_stale:
-                card["checksum"].setText("Warning: keeping last sane level/HP/stats")
-            else:
-                card["checksum"].setText(
-                    "✓ RAM data valid"
-                    if pokemon.checksum_valid
-                    else "Warning: RAM checksum invalid"
-                )
-            ram_state = (
-                "warning"
-                if pokemon.sample_stale or pokemon.battle_stats_stale
-                else "valid"
-                if pokemon.checksum_valid
-                else "invalid"
-            )
-            card["checksum"].setProperty("ramState", ram_state)
-            refresh_style(card["checksum"])
+            apply_party_stats(card, pokemon)
             for stat, label in card["evs"].items():
                 value = pokemon.evs[stat]
                 label.setText(f"{value} / 252" if pokemon.checksum_valid else "-- / 252")
@@ -2007,51 +1943,14 @@ class MainWindow(QMainWindow):
         self.tracker_status_message.set_full_text(text, compact_text)
 
     def _refresh_tracker_stats_metadata(self, card: dict[str, object], pokemon) -> None:
-        compact = self.compact_mode
-        ability_name = pokemon.ability_name or f"Unknown #{pokemon.ability_id}"
-        if pokemon.checksum_valid:
-            card["nature"].setText(
-                f"{pokemon.nature_name} • {ability_name}"
-                if compact
-                else f"Nature: {pokemon.nature_name}"
-            )
-            card["ability"].setText(f"Ability: {ability_name}")
-            friendship = pokemon.friendship
-        else:
-            card["nature"].setText("Nature: -- • Ability: --" if compact else "Nature: --")
-            card["ability"].setText("Ability: --")
-            friendship = None
-
-        card["ability"].setVisible(not compact)
-        if card["friendship_bar_compact"] != compact:
-            card["friendship_bar"].setVisible(not compact)
-            card["friendship_bar_compact"] = compact
-        if card["friendship_value"] != friendship:
-            card["friendship_value"] = friendship
-            if friendship is not None:
-                card["friendship_bar"].setValue(friendship)
-        display_state = (friendship, compact)
-        if card["friendship_display_state"] != display_state:
-            card["friendship_display_state"] = display_state
-            if friendship is None:
-                text = "Friendship: -- / 255"
-            elif compact:
-                text = f"Friendship {friendship}"
-            else:
-                text = f"Friendship: {friendship} / 255 • {friendship_label(friendship)}"
-            card["friendship"].setText(text)
+        apply_party_metadata(card, pokemon, compact=self.compact_mode)
 
     def _refresh_tracker_moves(self, card: dict[str, object], pokemon) -> None:
         state = (pokemon.checksum_valid, pokemon.moves)
         if card["moves_display_state"] == state:
             return
         card["moves_display_state"] = state
-        if not pokemon.checksum_valid:
-            text = "Unavailable (checksum invalid)"
-        elif pokemon.moves:
-            text = "\n".join(pokemon.moves)
-        else:
-            text = "No moves learned"
+        text = project_moves_text(checksum_valid=pokemon.checksum_valid, moves=pokemon.moves)
         card["moves_list"].setText(text)
 
     def _refresh_tracker_target_display(self, card: dict[str, object], pokemon) -> None:

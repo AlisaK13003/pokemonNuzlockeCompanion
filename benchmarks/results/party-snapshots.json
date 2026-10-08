@@ -1,0 +1,282 @@
+{
+  "before": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "qt_platform": "offscreen",
+    "live_bizhawk": false,
+    "startup_fixture_ms": 846.8436,
+    "party_adapter_unchanged": {
+      "median_ms": 4.1474,
+      "round_ms": [
+        4.3603,
+        4.1474,
+        4.1535,
+        3.916,
+        3.9813
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "full_ui_poll_unchanged": {
+      "median_ms": 6.0995,
+      "round_ms": [
+        6.0995,
+        6.0651,
+        6.1757,
+        6.3142,
+        5.7806
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "profile_calls_30_polls": {
+      "resolve_move": 0,
+      "refresh_style": 4710,
+      "_refresh_tracker_stats_metadata": 180,
+      "_refresh_ram_party_debug": 30,
+      "_refresh_training_recommendations": 60
+    },
+    "phase_b": {
+      "unchanged_snapshot": {
+        "median_ms": 1.5496,
+        "round_ms": [
+          1.6366,
+          1.5496,
+          1.5483,
+          1.5657,
+          1.5227
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "changed_pair": {
+        "median_ms": 3.1746,
+        "round_ms": [
+          3.1962,
+          3.9343,
+          3.1714,
+          3.1591,
+          3.1746
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "invalid_valid_pair": {
+        "median_ms": 3.1825,
+        "round_ms": [
+          3.1825,
+          3.1956,
+          3.1582,
+          3.2637,
+          3.1638
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "calls_30_unchanged": {
+        "_decode_raw_party": 30,
+        "decode_party_pokemon": 180,
+        "replace": 210,
+        "snapshot": 60
+      },
+      "unchanged_traced_bytes": {
+        "retained": 36061,
+        "peak": 140182
+      },
+      "last_good_entries": 6,
+      "decode_calls_30_changed_pairs": 60,
+      "decode_calls_30_invalid_valid_pairs": 60,
+      "cold_snapshot_traced_bytes": {
+        "retained": 33833,
+        "peak": 104836
+      },
+      "full_ui_poll_unchanged": {
+        "median_ms": 8.0118,
+        "round_ms": [
+          8.0103,
+          8.0766,
+          8.0118,
+          8.0536,
+          7.965
+        ],
+        "iterations": 30,
+        "rounds": 5
+      }
+    },
+    "party_decode_same_payload": {
+      "median_ms": 1.4521,
+      "round_ms": [
+        1.4641,
+        1.4521,
+        1.4711,
+        1.4064,
+        1.4455
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "transport_party_line": {
+      "median_ms": 0.0074,
+      "round_ms": [
+        0.0075,
+        0.0074,
+        0.0076,
+        0.0074,
+        0.0073
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "pc_broad_4mib": {
+      "median_ms": 1105.2248,
+      "round_ms": [
+        1111.6373,
+        1105.2248,
+        1093.8769
+      ],
+      "iterations": 1,
+      "rounds": 3
+    },
+    "pc_broad_peak_traced_bytes": 4322768
+  },
+  "after": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "qt_platform": "offscreen",
+    "live_bizhawk": false,
+    "startup_fixture_ms": 787.8828,
+    "party_adapter_unchanged": {
+      "median_ms": 4.0921,
+      "round_ms": [
+        4.1733,
+        4.0921,
+        3.9262,
+        4.1612,
+        3.9732
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "full_ui_poll_unchanged": {
+      "median_ms": 5.917,
+      "round_ms": [
+        5.8571,
+        5.917,
+        6.043,
+        5.7883,
+        6.2421
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "profile_calls_30_polls": {
+      "resolve_move": 0,
+      "refresh_style": 4710,
+      "_refresh_tracker_stats_metadata": 180,
+      "_refresh_ram_party_debug": 30,
+      "_refresh_training_recommendations": 60
+    },
+    "phase_b": {
+      "unchanged_snapshot": {
+        "median_ms": 0.0175,
+        "round_ms": [
+          0.0216,
+          0.0192,
+          0.017,
+          0.0175,
+          0.0163
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "changed_pair": {
+        "median_ms": 3.0634,
+        "round_ms": [
+          3.3468,
+          3.0281,
+          3.1071,
+          3.0091,
+          3.0634
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "invalid_valid_pair": {
+        "median_ms": 3.0957,
+        "round_ms": [
+          3.0959,
+          3.1402,
+          3.0951,
+          3.0957,
+          3.044
+        ],
+        "iterations": 30,
+        "rounds": 5
+      },
+      "calls_30_unchanged": {
+        "_decode_raw_party": 0,
+        "decode_party_pokemon": 0,
+        "replace": 0,
+        "snapshot": 60
+      },
+      "unchanged_traced_bytes": {
+        "retained": 280,
+        "peak": 2880
+      },
+      "last_good_entries": 6,
+      "decode_calls_30_changed_pairs": 59,
+      "decode_calls_30_invalid_valid_pairs": 60,
+      "cold_snapshot_traced_bytes": {
+        "retained": 34265,
+        "peak": 104852
+      },
+      "full_ui_poll_unchanged": {
+        "median_ms": 6.0948,
+        "round_ms": [
+          6.0805,
+          6.0948,
+          6.1656,
+          6.1113,
+          6.0747
+        ],
+        "iterations": 30,
+        "rounds": 5
+      }
+    },
+    "party_decode_same_payload": {
+      "median_ms": 0.0016,
+      "round_ms": [
+        0.0017,
+        0.0017,
+        0.0016,
+        0.0016,
+        0.0016
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "transport_party_line": {
+      "median_ms": 0.0074,
+      "round_ms": [
+        0.0075,
+        0.0079,
+        0.0074,
+        0.0074,
+        0.0074
+      ],
+      "iterations": 30,
+      "rounds": 5
+    },
+    "pc_broad_4mib": {
+      "median_ms": 1142.1424,
+      "round_ms": [
+        1142.0845,
+        1147.2508,
+        1142.1424
+      ],
+      "iterations": 1,
+      "rounds": 3
+    },
+    "pc_broad_peak_traced_bytes": 4322768
+  }
+}
