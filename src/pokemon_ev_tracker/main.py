@@ -21,7 +21,9 @@ def configure_logging() -> None:
     log_level = configured_level if isinstance(configured_level, int) else logging.INFO
     logging.basicConfig(
         level=log_level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        format=("%(asctime)s %(levelname)s [%(name)s] %(message)s"
+                if log_level <= logging.DEBUG else "%(asctime)s %(levelname)s: %(message)s"),
+        datefmt="%H:%M:%S",
     )
 
 
@@ -31,6 +33,7 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     window = MainWindow(settings=settings)
+    app.aboutToQuit.connect(window.save_backup_service.stop)
     window.show()
     return app.exec()
 

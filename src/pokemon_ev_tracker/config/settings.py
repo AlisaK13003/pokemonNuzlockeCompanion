@@ -26,6 +26,19 @@ def _normalize_window_geometry(value) -> tuple[int, int, int, int] | None:
 
 @dataclass
 class AppSettings:
+    bizhawk_save_ram_directory: str = ""
+    bizhawk_state_directory: str = ""
+    bizhawk_save_name: str = ""
+    always_on_top: bool = False
+    remember_geometry: bool = True
+    launch_compact: bool = False
+    advanced_diagnostics: bool = False
+    auto_pc_rediscovery: bool = True
+    notify_connection: bool = True
+    notify_encounters: bool = True
+    notify_faints: bool = True
+    notify_friendship: bool = True
+    encounter_action: str = "ASK ME"
     compact_mode: bool = False
     tracker_view: str = "training"
     workspace_view: str | None = None
@@ -39,17 +52,30 @@ class AppSettings:
     normal_window_geometry: tuple[int, int, int, int] | None = None
 
     def __post_init__(self) -> None:
+        for key in ("bizhawk_save_ram_directory", "bizhawk_state_directory", "bizhawk_save_name"):
+            if not isinstance(getattr(self, key), str):
+                setattr(self, key, "")
+        for key in ("always_on_top", "remember_geometry", "launch_compact", "advanced_diagnostics",
+                    "auto_pc_rediscovery", "notify_connection", "notify_encounters",
+                    "notify_faints", "notify_friendship"):
+            value = getattr(self, key)
+            if type(value) is not bool:
+                setattr(self, key, key in {"remember_geometry", "auto_pc_rediscovery", "notify_connection",
+                                         "notify_encounters", "notify_faints", "notify_friendship"})
+        if self.encounter_action not in {"ASK ME", "AUTOMATIC", "IGNORE"}:
+            self.encounter_action = "ASK ME"
         self.compact_mode = bool(self.compact_mode)
         if self.nuzlocke_wipe_action not in {"ASK ME", "END RUN AS WIPED", "IGNORE"}:
             self.nuzlocke_wipe_action = "ASK ME"
         self.prompt_for_nuzlocke_run = bool(self.prompt_for_nuzlocke_run)
         if not isinstance(self.workspace_view, str) or self.workspace_view not in {
-            "training", "stats", "nuzlocke", "diagnostics",
+            "training", "stats", "box", "nuzlocke", "diagnostics", "settings",
         }:
             self.workspace_view = None
         if not isinstance(self.tracker_view, str) or self.tracker_view not in {
             "training",
             "stats",
+            "box",
         }:
             self.tracker_view = "training"
         if not isinstance(self.friendship_walk_axis, str) or self.friendship_walk_axis not in {
@@ -110,6 +136,15 @@ class AppSettings:
         if not isinstance(data, dict):
             return cls()
         return cls(
+            bizhawk_save_ram_directory=data.get("bizhawk_save_ram_directory", ""),
+            bizhawk_state_directory=data.get("bizhawk_state_directory", ""),
+            bizhawk_save_name=data.get("bizhawk_save_name", ""),
+            **{key: data.get(key, default) for key, default in {
+                "always_on_top": False, "remember_geometry": True, "launch_compact": False,
+                "advanced_diagnostics": False, "auto_pc_rediscovery": True,
+                "notify_connection": True, "notify_encounters": True,
+                "notify_faints": True, "notify_friendship": True, "encounter_action": "ASK ME",
+            }.items()},
             compact_mode=data.get("compact_mode", False),
             tracker_view=data.get("tracker_view", "training"),
             workspace_view=data.get("workspace_view"),

@@ -24,6 +24,10 @@ def test_settings_round_trip(tmp_path) -> None:
 
     assert loaded == original
     assert set(json.loads(path.read_text(encoding="utf-8"))) == {
+        "bizhawk_save_ram_directory", "bizhawk_state_directory", "bizhawk_save_name",
+        "always_on_top", "remember_geometry", "launch_compact", "advanced_diagnostics",
+        "auto_pc_rediscovery", "notify_connection", "notify_encounters", "notify_faints",
+        "notify_friendship", "encounter_action",
         "compact_mode",
         "tracker_view",
         "workspace_view",
@@ -76,6 +80,10 @@ def test_load_default_migrates_only_tracker_preferences(monkeypatch, tmp_path) -
     assert settings.compact_mode
     assert settings.window_geometry == (1, 2, 600, 400)
     assert set(json.loads(destination.read_text(encoding="utf-8"))) == {
+        "bizhawk_save_ram_directory", "bizhawk_state_directory", "bizhawk_save_name",
+        "always_on_top", "remember_geometry", "launch_compact", "advanced_diagnostics",
+        "auto_pc_rediscovery", "notify_connection", "notify_encounters", "notify_faints",
+        "notify_friendship", "encounter_action",
         "compact_mode",
         "tracker_view",
         "workspace_view",

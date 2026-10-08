@@ -31,7 +31,7 @@ def workspace(tmp_path):
 def test_run_routes_and_empty_library_are_available(workspace):
     _app, _store, view = workspace
     assert [view.sections.tabText(index) for index in range(view.sections.count())] == [
-        "Dashboard", "Encounters", "Deaths", "Fights", "Run Library",
+        "Dashboard", "Encounters", "Deaths", "Fights", "Run Library", "Manage locations",
     ]
     assert not view.empty_panel.isHidden()
     assert view.sections.isHidden()
@@ -123,7 +123,7 @@ def test_narrow_dashboard_reflows_and_ledger_scrolls_locally(workspace):
     scroll.resize(500, 480)
     scroll.show()
     app.processEvents()
-    columns = view.findChild(RunColumns)
+    columns = next(item for item in view.findChildren(RunColumns) if item.isVisible())
     assert columns.columns.direction() == QBoxLayout.Direction.TopToBottom
     view.show_section("Encounters")
     app.processEvents()

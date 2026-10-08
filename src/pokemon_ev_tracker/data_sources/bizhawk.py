@@ -504,7 +504,11 @@ class BizHawkRamDataSource(GameDataSource):
                 "stable_new": [],
                 "reason": "First validated PC snapshot for this Lua/ROM session",
             }
-            LOGGER.info(
+            LOGGER.debug(
+                "PC monitoring ready: %d boxed Pokemon in the current snapshot.",
+                len(current),
+            )
+            LOGGER.debug(
                 "PC monitor baseline: frame=%s stream=%s occupied=%s",
                 state.scan_frame, stream_identity, sorted(current),
             )
@@ -560,14 +564,14 @@ class BizHawkRamDataSource(GameDataSource):
                 for identity in sorted(current_sightings)
             ],
         }
-        LOGGER.info(
+        LOGGER.debug(
             "PC monitor frame=%s stream=%s previous=%s current=%s added=%s removed=%s stable_new=%s pending=%s",
             state.scan_frame, stream_identity, sorted(previous_occupied), sorted(current),
             sorted(added_ids), sorted(removed_ids),
             [mon.stable_id for mon in changes], sorted(current_sightings),
         )
         for identity in sorted(added_ids):
-            LOGGER.info(
+            LOGGER.debug(
                 "PC monitor newly occupied record frame=%s details=%s stable=%s",
                 state.scan_frame, _boxed_monitor_identity(current[identity]),
                 identity in self._pc_storage_stable_ids,
@@ -727,11 +731,7 @@ class BizHawkRamDataSource(GameDataSource):
                 party.party_count,
                 party.party_count_valid,
                 party.pokemon,
-                error=(
-                    f"Selected scanned candidate at relative offset "
-                    f"{candidate.get('relative_offset')} with "
-                    f"{valid_checksum_count(party)} valid checksum slot(s)."
-                ),
+                error=party.error,
                 candidate_count=len(decoded_candidates),
             )
             return verified

@@ -20,6 +20,7 @@ from pokemon_ev_tracker.core.nuzlocke.models import (
     NuzlockeRun,
     PokemonAcquisitionEvent,
     RunStatus,
+    ShinyEncounter,
 )
 
 DEFAULT_NUZLOCKE_PATH = app_data_directory() / "nuzlocke_runs.json"
@@ -199,11 +200,29 @@ class NuzlockeStore:
         return changed
 
     def update_encounter(self, run_id: str, encounter: EncounterRecord) -> None:
+        self.update_encounters(run_id, (encounter,))
+
+    def update_encounters(self, run_id: str, encounters: tuple[EncounterRecord, ...]) -> None:
+        """Save a management draft once, including linked deaths, or roll back fully."""
         run = self._require_run(run_id)
+        for encounter in encounters:
+            if encounter.location_id not in run.encounters:
+                raise KeyError(f"Unknown encounter location: {encounter.location_id}")
+        previous = run.encounters.copy()
+        previous_deaths = run.deaths.copy()
+        try:
+            for encounter in encounters:
+                self._apply_encounter(run, encounter)
+            self.save()
+        except OSError:
+            run.encounters = previous
+            run.deaths = previous_deaths
+            raise
+
+    @staticmethod
+    def _apply_encounter(run: NuzlockeRun, encounter: EncounterRecord) -> None:
         if encounter.location_id not in run.encounters:
             raise KeyError(f"Unknown encounter location: {encounter.location_id}")
-        previous = run.encounters[encounter.location_id]
-        previous_deaths = run.deaths.copy()
         run.encounters[encounter.location_id] = encounter
         linked_death = next(
             (death for death in run.deaths if death.encounter_location_id == encounter.location_id),
@@ -232,13 +251,6 @@ class NuzlockeStore:
                 run.deaths.append(death)
         elif linked_death:
             run.deaths.remove(linked_death)
-        try:
-            self.save()
-        except OSError:
-            run.encounters[encounter.location_id] = previous
-            run.deaths = previous_deaths
-            raise
-
     def has_observed_pokemon(self, run_id: str, stable_id: str) -> bool:
         run = self._require_run(run_id)
         return stable_id in run.observed_pokemon_ids
@@ -258,6 +270,45 @@ class NuzlockeStore:
         except OSError:
             run.observed_pokemon_ids = previous
             raise
+
+    def reconcile_party_encounters(
+        self, run_id: str, records: tuple[EncounterRecord, ...], *, complete_starter_observation=False
+    ) -> tuple[EncounterRecord, ...]:
+        """Atomically fill empty rows without replacing manual history or identities."""
+        run = self._require_run(run_id)
+        previous_encounters = run.encounters.copy()
+        previous_observed = run.observed_pokemon_ids.copy()
+        previous_resolved = run.resolved_acquisition_ids.copy()
+        previous_starter = run.starter_observation_complete
+        if complete_starter_observation:
+            run.starter_observation_complete = True
+        linked_ids = {row.stable_id for row in run.encounters.values() if row.stable_id}
+        linked_ids.update(death.stable_id for death in run.deaths if death.stable_id)
+        accepted = []
+        for record in records:
+            base = run.encounters.get(record.location_id)
+            if (base is None or not _encounter_is_unused(base) or base.stable_id
+                    or not record.stable_id or record.stable_id in linked_ids):
+                continue
+            run.encounters[record.location_id] = record
+            linked_ids.add(record.stable_id)
+            if record.stable_id not in run.observed_pokemon_ids:
+                run.observed_pokemon_ids.append(record.stable_id)
+            if (any(event.stable_id == record.stable_id for event in run.acquisition_events)
+                    and record.stable_id not in run.resolved_acquisition_ids):
+                run.resolved_acquisition_ids.append(record.stable_id)
+            accepted.append(record)
+        if not accepted and previous_starter == run.starter_observation_complete:
+            return ()
+        try:
+            self.save()
+        except OSError:
+            run.encounters = previous_encounters
+            run.observed_pokemon_ids = previous_observed
+            run.resolved_acquisition_ids = previous_resolved
+            run.starter_observation_complete = previous_starter
+            raise
+        return tuple(accepted)
 
     def record_acquisition_event(self, run_id: str, event: PokemonAcquisitionEvent) -> bool:
         run = self._require_run(run_id)
@@ -529,6 +580,29 @@ class NuzlockeStore:
             run.fight_notes = previous
             raise
 
+    def record_shiny_encounters(self, run_id: str, records: tuple[ShinyEncounter, ...]) -> tuple[ShinyEncounter, ...]:
+        run = self._require_run(run_id)
+        existing = {record.stable_id for record in run.shiny_encounters}
+        added = []
+        for record in records:
+            if record.stable_id not in existing:
+                existing.add(record.stable_id)
+                added.append(record)
+        if not added:
+            return ()
+        previous = run.shiny_encounters.copy(), run.resolved_acquisition_ids.copy()
+        run.shiny_encounters.extend(added)
+        pending = {event.stable_id for event in run.acquisition_events}
+        for record in added:
+            if record.stable_id in pending and record.stable_id not in run.resolved_acquisition_ids:
+                run.resolved_acquisition_ids.append(record.stable_id)
+        try:
+            self.save()
+        except OSError:
+            run.shiny_encounters, run.resolved_acquisition_ids = previous
+            raise
+        return tuple(added)
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -709,12 +783,40 @@ def _deserialize_run(raw: dict) -> NuzlockeRun:
         deaths=deaths,
         observed_pokemon_ids=[str(item) for item in observed_ids],
         acquisition_events=events,
+        shiny_encounters=_deserialize_shinies(raw.get("shiny_encounters", [])),
         resolved_acquisition_ids=[str(item) for item in resolved_ids],
         auto_record_unambiguous_encounters=bool(
             raw.get("auto_record_unambiguous_encounters", False)
         ),
         automatically_confirm_deaths=bool(raw.get("automatically_confirm_deaths", False)),
+        starter_observation_complete=bool(raw.get("starter_observation_complete", False)),
     )
+
+
+def _deserialize_shinies(raw) -> list[ShinyEncounter]:
+    records = []
+    seen = set()
+    if not isinstance(raw, list):
+        return records
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            record = ShinyEncounter(
+                stable_id=str(item["stable_id"]), species_id=int(item["species_id"]),
+                species_name=str(item["species_name"]), nickname=str(item.get("nickname", "")),
+                level=_optional_level(item.get("level")), met_level=_optional_level(item.get("met_level")),
+                location_id=str(item["location_id"]) if item.get("location_id") else None,
+                location_name=str(item.get("location_name", "Unknown location")),
+                source_location=str(item.get("source_location", "MANUAL")),
+                detected_at=str(item.get("detected_at", "")), notes=str(item.get("notes", "")),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        if record.stable_id not in seen:
+            records.append(record)
+            seen.add(record.stable_id)
+    return records
 
 
 def _optional_level(value) -> int | None:

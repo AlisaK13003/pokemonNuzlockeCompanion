@@ -54,6 +54,25 @@ def test_animated_sprite_path_resolves_by_species_id(monkeypatch):
     assert sprite_loader.get_animated_sprite_path(443) == expected
 
 
+def test_companion_asset_checks_disk_once_until_cache_clear(monkeypatch):
+    calls = []
+    expected = sprite_loader.ASSET_SPRITE_DIRECTORY / "companion" / "443.gif"
+
+    def is_file(path):
+        calls.append(path)
+        return path == expected
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    first = sprite_loader.resolve_sprite_asset(443, companion=True)
+    assert first.kind == "animated" and first.path == expected
+    for _ in range(20):
+        assert sprite_loader.resolve_sprite_asset(443, companion=True) == first
+    assert calls == [expected]
+    sprite_loader.clear_sprite_cache()
+    sprite_loader.resolve_sprite_asset(443, companion=True)
+    assert calls == [expected, expected]
+
+
 def test_animated_asset_is_preferred_to_available_static_sprite(qt_app):
     asset = sprite_loader.resolve_sprite_asset(443)
 

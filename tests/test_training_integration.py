@@ -98,7 +98,7 @@ def _edit(monkeypatch, window, stats, *, accept=True, during_dialog=None):
 
     monkeypatch.setattr(TrainingFocusDialog, "exec", execute)
     view = window.compact_training_view if window.compact_mode else window.training_view
-    view.edit_button.click()
+    window._edit_training_focus(view.selected_slot)
 
 
 def _status(window, slot=1):
@@ -113,7 +113,7 @@ def test_save_cancel_clear_and_restart_use_preferences_only(make_window, monkeyp
     source.opponents(66)  # Machop: Attack +1.
     window._refresh_ram_backend_debug()
     assert _status(window) == "no-focus"
-    assert window.training_view.focus_summary.text() == "No focus set"
+    assert window.training_view.focus_summary.text() == "Select every stat you're happy to gain"
 
     _edit(monkeypatch, window, {"hp", "attack"})
 
@@ -135,7 +135,7 @@ def test_save_cancel_clear_and_restart_use_preferences_only(make_window, monkeyp
     restored.training_view.clear_button.click()
     assert restored_store.get(0) is None
     assert EVTrainingPreferenceStore(store.path).get(0) is None
-    assert restored.training_view.focus_summary.text() == "No focus set"
+    assert restored.training_view.focus_summary.text() == "Select every stat you're happy to gain"
     assert _status(restored) == "no-focus"
     assert legacy.path.read_bytes() == old_contents
 
@@ -224,10 +224,10 @@ def test_compact_uses_same_result_and_updates_focus_without_another_poll(make_wi
     _edit(monkeypatch, window, {"attack", "special_attack"})
     assert _status(window) == "good"
     assert store.get(0).allowed_stats == {"attack", "special_attack"}
-    window.compact_training_view.clear_button.click()
+    window._clear_training_focus(window.compact_training_view.selected_slot)
     assert _status(window) == "no-focus"
     window.set_compact_mode(False)
-    assert window.training_view.focus_summary.text() == "No focus set"
+    assert window.training_view.focus_summary.text() == "Select every stat you're happy to gain"
 
 
 def test_actual_evs_are_independent_of_focus_and_legacy_targets(make_window, monkeypatch):
@@ -238,7 +238,7 @@ def test_actual_evs_are_independent_of_focus_and_legacy_targets(make_window, mon
     source.party = replace(source.party, pokemon=(mon, source.party.pokemon[1]))
     window._refresh_ram_backend_debug()
     _edit(monkeypatch, window, {"hp", "attack"})
-    for view in (window.training_view, window.compact_training_view):
+    for view in (window.training_view,):
         assert [label.text() for label in view.ev_values.values()] == [str(v) for v in evs.values()]
         assert view.total.text() == "243 / 510 total"
         assert not hasattr(view, "ev_bars")

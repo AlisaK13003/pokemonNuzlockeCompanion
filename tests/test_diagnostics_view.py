@@ -115,6 +115,23 @@ def test_pc_recovery_uses_existing_messages_and_preserves_advanced_widget(diagno
     assert calls == ["rediscover"]
 
 
+def test_healthy_hero_requires_verified_commands_and_current_pc_monitoring(diagnostics):
+    _app, view, _advanced, _calls = diagnostics
+    snapshot = _snapshot(connected=True, fresh=True)
+    presentation = {"command_state": "ACKNOWLEDGED", "pc_status": "Status: Monitoring",
+                    "pc_layout": "Box layout: Resolved"}
+    view.refresh(snapshot, presentation)
+    assert view.hero_title.text() == "Connected & healthy"
+    for key in ("party", "pc", "layout", "command"):
+        assert view.fields[key].value.property("statusRole") == "success"
+    for key, value in (("command_state", "UNKNOWN"), ("pc_status", "Status: Monitoring paused"),
+                       ("pc_layout", "Box layout: Unresolved")):
+        view.refresh(snapshot, {**presentation, key: value})
+        assert view.hero_title.text() != "Connected & healthy"
+    view.refresh(_snapshot(connected=True, fresh=False), presentation)
+    assert view.hero_title.text() != "Connected & healthy"
+
+
 @pytest.mark.parametrize("width, columns", [(1200, 4), (620, 2), (400, 1)])
 def test_status_reflows_without_horizontal_overflow(diagnostics, width, columns):
     app, view, _advanced, _calls = diagnostics

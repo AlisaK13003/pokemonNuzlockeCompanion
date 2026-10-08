@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QStatusBar,
@@ -35,7 +36,7 @@ from pokemon_ev_tracker.core.automation.friendship_walk import (
 )
 from pokemon_ev_tracker.core.ev_changes import EVChangeTracker
 from pokemon_ev_tracker.core.ev_targets import EVTargetStore
-from pokemon_ev_tracker.core.ev_training import recommend_battle_evs
+from pokemon_ev_tracker.core.ev_training import EVTrainingPreference, recommend_battle_evs
 from pokemon_ev_tracker.core.friendship_training import (
     ETAStatus,
     FriendshipETA,
@@ -45,12 +46,17 @@ from pokemon_ev_tracker.core.friendship_training import (
 from pokemon_ev_tracker.core.moves import PokemonMoveState, resolve_move
 from pokemon_ev_tracker.core.nuzlocke.acquisition import (
     PartyAcquisitionObserver,
+    reconcile_initial_starter,
+    reconcile_party_encounters,
+    reconcile_shiny_encounters,
 )
 from pokemon_ev_tracker.core.nuzlocke.death_detection import PartyHpObserver, PartyHpSample
 from pokemon_ev_tracker.core.nuzlocke.models import PartyLevel
 from pokemon_ev_tracker.core.nuzlocke.run_prompt import NoRunPromptObserver
 from pokemon_ev_tracker.core.nuzlocke.storage import NuzlockeStore
 from pokemon_ev_tracker.core.nuzlocke.wipe_detection import PartyWipeCandidate, PartyWipeObserver
+from pokemon_ev_tracker.core.pc_discovery_status import pc_discovery_failure_message
+from pokemon_ev_tracker.core.save_backups import SaveBackupService
 from pokemon_ev_tracker.data_sources.base import GameDataSource
 from pokemon_ev_tracker.games.provider import GameProvider, GameSession
 from pokemon_ev_tracker.games.registry import (
@@ -74,15 +80,25 @@ from pokemon_ev_tracker.ui.diagnostics_view import DiagnosticsView
 from pokemon_ev_tracker.ui.ev_change_log import EvChangeLogWidget
 from pokemon_ev_tracker.ui.ev_target_dialog import EVTargetDialog
 from pokemon_ev_tracker.ui.friendship_panel import FriendshipWalkPanel
+from pokemon_ev_tracker.ui.inspection_views import BoxView
 from pokemon_ev_tracker.ui.item_sprite_loader import (
     get_item_sprite,
     item_sprite_exists,
     item_sprite_path,
     item_sprite_slug,
 )
+from pokemon_ev_tracker.ui.notification_events import (
+    connection_notice,
+    friendship_notice,
+    recorded_encounter_notice,
+    refresh_event_notices,
+    shiny_notice,
+)
+from pokemon_ev_tracker.ui.notifications import NotificationCenter
 from pokemon_ev_tracker.ui.nuzlocke_view import NuzlockeView
 from pokemon_ev_tracker.ui.opponent_panel import CurrentOpponentPanel
-from pokemon_ev_tracker.ui.party_card import PartyCard
+from pokemon_ev_tracker.ui.party_card import EV_STAT_LABELS, PartyCard
+from pokemon_ev_tracker.ui.preferences_view import DisconnectedView, PreferencesView
 from pokemon_ev_tracker.ui.sprite_loader import (
     get_animated_sprite_size,
     get_static_sprite,
@@ -227,6 +243,9 @@ class MainWindow(QMainWindow):
         self._training_opponent_yields = ()
         self._training_battle_state = "idle"
         self._training_party_connected = False
+        self._last_connection = None
+        self._connection_notice = ""
+        self._connection_notice_until = 0.0
         self.training_recommendations = {}
         self.nuzlocke_view = NuzlockeView(
             store=nuzlocke_store,
@@ -276,6 +295,7 @@ class MainWindow(QMainWindow):
         self._last_pc_storage_scan_frame: int | None = None
         self._party_hp_observer = PartyHpObserver()
         self._party_wipe_observer = PartyWipeObserver()
+        self._pending_wipe = None
         self._no_run_prompt_observer = NoRunPromptObserver()
         self.compact_mode = False
         self.tracker_view = "training"
@@ -319,9 +339,13 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"{self.profile.display_name} Companion")
         self.setMinimumSize(
-            QSize(320, 300) if settings.compact_mode else QSize(620, 480)
+            QSize(320, 300) if settings.compact_mode else QSize(480, 480)
         )
         self.resize(1100, 760)
+        if not settings.bizhawk_save_ram_directory:
+            settings.bizhawk_save_ram_directory = os.environ.get("BIZHAWK_SAVE_RAM_DIR", "")
+        self.save_backup_service = SaveBackupService(
+            settings, self._backup_game_name, parent=self)
         self._build_ui()
         self._apply_game_capabilities()
         apply_theme(self)
@@ -337,9 +361,11 @@ class MainWindow(QMainWindow):
             if settings.compact_mode
             else settings.normal_window_geometry or settings.window_geometry
         )
-        if saved_geometry is not None:
+        if saved_geometry is not None and settings.remember_geometry:
             self.setGeometry(*saved_geometry)
-        self._set_compact_mode(settings.compact_mode, persist=False, initial=True)
+        self._launch_compact_pending = settings.compact_mode or settings.launch_compact
+        self._compact_geometry = settings.window_geometry if settings.compact_mode and settings.remember_geometry else None
+        self._set_compact_mode(False, persist=False, initial=True)
         self._suspend_geometry_save = False
 
         if self.provider.capabilities.live_party:
@@ -352,6 +378,12 @@ class MainWindow(QMainWindow):
             self._refresh_ram_backend_debug()
         else:
             self._show_unsupported_game_state()
+        self.save_backup_service.start()
+
+    def _backup_game_name(self):
+        server = getattr(self.ram_data_source, "server", None)
+        latest = getattr(server, "latest_heartbeat", lambda: None)()
+        return latest.payload.get("lua_rom_name") if latest is not None else None
 
     def _build_ui(self) -> None:
         self.backend_status = BackendStatusWidget()
@@ -369,6 +401,7 @@ class MainWindow(QMainWindow):
             self.provider.display_name, self.backend_status,
             generation=self.provider.generation, emulator=self.provider.emulator)
         self.shell.setProperty("gameMotif", self.provider.theme.motif_id)
+        self.shell.session_title = getattr(self.provider, "field_session_title", "Field session")
         self.shell.setProperty("gameAccentPrimary", self.provider.theme.accent_primary)
         self.shell.setProperty("gameAccentSecondary", self.provider.theme.accent_secondary)
         self.setCentralWidget(self.shell)
@@ -405,6 +438,7 @@ class MainWindow(QMainWindow):
         for view in (self.training_view, self.compact_training_view):
             view.edit_focus_requested.connect(self._edit_training_focus)
             view.clear_focus_requested.connect(self._clear_training_focus)
+            view.focus_stat_requested.connect(self._toggle_training_stat)
         self.nuzlocke_view.presentation_changed.connect(self._refresh_fight_summaries)
         self._refresh_fight_summaries()
         self.current_opponent_panel = CurrentOpponentPanel(
@@ -424,8 +458,32 @@ class MainWindow(QMainWindow):
 
         advanced = build_advanced_diagnostics(self)
         self.diagnostics_view = DiagnosticsView(advanced, self._rediscover_pc_layout)
+        self.shell.heading_actions.addWidget(self.diagnostics_view.advanced_toggle)
+        self.diagnostics_view.advanced_toggle.setEnabled(self.settings.advanced_diagnostics)
+        self.diagnostics_view.advanced_toggle.setToolTip("Enable advanced diagnostics in Settings to inspect technical tooling.")
+        self.diagnostics_view.section_buttons["advanced"].setVisible(self.settings.advanced_diagnostics)
+        self.diagnostics_view.tabs_panel.hide()
+        self.diagnostics_view.advanced_button.setVisible(self.settings.advanced_diagnostics)
+        self.box_view = BoxView(self.provider)
+        self.preferences_view = PreferencesView(self.settings, self.nuzlocke_view, self.provider)
+        self.preferences_view.backup_requested.connect(self.save_backup_service.request_backup)
+        self.save_backup_service.status_changed.connect(self.preferences_view.update_backup_status)
+        self.save_backup_service._publish_status("Waiting for initial backup.")
+        self.notifications = NotificationCenter(self.shell)
+        self.preferences_view.preview_requested.connect(self.notifications.preview)
+        self.preferences_view.changed.connect(self._preference_changed)
+        self.preferences_view.reset_requested.connect(self._reset_preferences)
+        self.preferences_view.compact_requested.connect(lambda: self.set_compact_mode(True))
+        self.preferences_view.rediscover_requested.connect(self._rediscover_pc_layout)
+        self.disconnected_view = DisconnectedView()
+        self.disconnected_view.retry_requested.connect(self._retry_connection)
         self.ram_debug_scroll_area = self.diagnostics_view.advanced_scroll_area
         self.nuzlocke_view.rediscover_pc_requested.connect(self._rediscover_pc_layout)
+        self.review_wipe_button = QPushButton("Review detected party wipe")
+        self.review_wipe_button.setProperty("buttonRole", "danger")
+        self.review_wipe_button.clicked.connect(self._review_pending_wipe)
+        self.review_wipe_button.hide()
+        self.nuzlocke_view._run_content_layout.insertWidget(0, self.review_wipe_button)
         self.compact_nuzlocke_view = CompactNuzlockeView(self.nuzlocke_view)
         self.compact_nuzlocke_view.review_requested.connect(self._expand_nuzlocke)
         self.compact_nuzlocke_view.rediscover_pc_requested.connect(self._rediscover_pc_layout)
@@ -433,6 +491,8 @@ class MainWindow(QMainWindow):
         for key, page in (
             ("training", self.training_view), ("stats", self.party_stats_view),
             ("nuzlocke", self.nuzlocke_scroll_area), ("diagnostics", self.diagnostics_view),
+            ("box", self.box_view), ("settings", self.preferences_view),
+            ("disconnected", self.disconnected_view),
             ("compact_training", self.compact_training_view),
             ("compact_stats", self.compact_party_stats_view),
             ("compact_nuzlocke", self.compact_nuzlocke_view),
@@ -452,6 +512,7 @@ class MainWindow(QMainWindow):
 
     def _apply_game_capabilities(self) -> None:
         caps = self.provider.capabilities
+        self.shell.nav_buttons["box"].setVisible(caps.pc_storage)
         self.friendship_walk_group.setVisible(caps.friendship_walk)
         self.start_friendship_walk_button.setEnabled(caps.friendship_walk)
         self.stop_friendship_walk_button.setEnabled(caps.friendship_walk)
@@ -477,11 +538,14 @@ class MainWindow(QMainWindow):
         self.shell.system_label.setText(message)
         self.current_opponent_panel.set_unavailable()
 
-    def _select_party_slot(self, slot: int) -> None:
+    def _select_party_slot(self, slot: int, *, sync_friendship: bool = True) -> None:
         for view in self._party_views:
             view.blockSignals(True)
             view.set_selected_slot(slot)
             view.blockSignals(False)
+        if sync_friendship:
+            self.friendship_walk_group.select_pokemon(
+                self.tracker_party_cards.get(slot, {}).get("pokemon"))
 
     def _refresh_party_workspaces(self, connected=None) -> None:
         if connected is None:
@@ -514,8 +578,9 @@ class MainWindow(QMainWindow):
             view.blockSignals(True)
             view.refresh(self.tracker_party_cards, connected=connected)
             view.blockSignals(False)
-        self._select_party_slot(self.training_view.selected_slot)
+        self._select_party_slot(self.training_view.selected_slot, sync_friendship=False)
         self.friendship_walk_group.refresh_party(self.tracker_party_cards)
+        self.nuzlocke_view.set_party_cards(self.tracker_party_cards if connected else {})
         self._render_friendship_walk()
         self._refresh_training_recommendations(() if not connected else None)
 
@@ -524,12 +589,16 @@ class MainWindow(QMainWindow):
         self.training_view.set_fight_timeline(timeline)
         self.compact_training_view.set_fight_timeline(timeline)
 
-    def _handle_party_wipe(self, candidate: PartyWipeCandidate) -> None:
+    def _handle_party_wipe(self, candidate: PartyWipeCandidate, *, review=False) -> None:
         run = self.nuzlocke_view.store.active_run
         if run is None or run.run_id != candidate.run_id:
             return
         action = self.settings.nuzlocke_wipe_action
         if action == "IGNORE":
+            return
+        if action == "ASK ME" and not self.settings.notify_faints and not review:
+            self._pending_wipe = candidate
+            self.review_wipe_button.show()
             return
         if action == "ASK ME":
             box = QMessageBox(self)
@@ -560,6 +629,13 @@ class MainWindow(QMainWindow):
         if box.clickedButton() is create_button:
             self.nuzlocke_view._create_run()
 
+    def _review_pending_wipe(self) -> None:
+        candidate = self._pending_wipe
+        self._pending_wipe = None
+        self.review_wipe_button.hide()
+        if candidate is not None:
+            self._handle_party_wipe(candidate, review=True)
+
     def _prompt_create_run_without_active(self) -> None:
         if self.nuzlocke_view.store.active_run is not None:
             return
@@ -584,6 +660,7 @@ class MainWindow(QMainWindow):
             self.training_recommendations = {}
             self.recommendation_panel.refresh(
                 self.tracker_party_cards, {}, battle_state="unavailable")
+            self.compact_training_view.refresh_recommendations({}, battle_state="unavailable")
             return
         if opponents is not None:
             yields = tuple(self.provider.get_training_ev_yield(enemy.species_id) for enemy in opponents)
@@ -603,6 +680,84 @@ class MainWindow(QMainWindow):
             self.tracker_party_cards, self.training_recommendations,
             battle_state=self._training_battle_state,
         )
+        self.compact_training_view.refresh_recommendations(self.training_recommendations, battle_state=self._training_battle_state)
+        if self._training_opponent_yields and all(self._training_opponent_yields):
+            labels = dict(EV_STAT_LABELS)
+            combined = {key: sum(value.as_mapping()[key] for value in self._training_opponent_yields)
+                        for key in labels}
+            self.current_opponent_panel.combined_yield.setText("Combined EV yield · " + " · ".join(
+                f"+{value} {labels[key]}" for key, value in combined.items() if value))
+        self.current_opponent_panel.combined_yield.setVisible(len(self._training_opponent_yields) > 1)
+
+    def _toggle_training_stat(self, slot: int, stat: str) -> None:
+        card = self.tracker_party_cards.get(slot, {})
+        pokemon, pid = card.get("pokemon"), card.get("pid")
+        if pokemon is None or pid is None or not pokemon.checksum_valid:
+            return
+        previous = self.training_preference_store.get(pid)
+        allowed = set(previous.allowed_stats if previous else ())
+        allowed.symmetric_difference_update({stat})
+        try:
+            self.training_preference_store.set(pid, EVTrainingPreference(frozenset(allowed)))
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Could not save training focus", str(error))
+        self._refresh_party_workspaces()
+
+    def _preference_changed(self, key, value) -> None:
+        if key == "auto_record":
+            self.nuzlocke_view.auto_record_acquisitions.setChecked(value)
+        elif key == "auto_deaths":
+            self.nuzlocke_view.auto_confirm_deaths.setChecked(value)
+        else:
+            setattr(self.settings, key, value)
+            self.settings.save_default()
+        if key == "always_on_top":
+            visible = self.isVisible()
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, self.compact_mode or value)
+            if visible:
+                self.show()
+        elif key == "advanced_diagnostics":
+            self.diagnostics_view.section_buttons["advanced"].setVisible(value)
+            self.diagnostics_view.tabs_panel.hide()
+            self.diagnostics_view.advanced_toggle.setEnabled(value)
+            self.diagnostics_view.advanced_button.setVisible(value)
+            if not value:
+                self.diagnostics_view.set_section("status")
+        elif key == "encounter_action":
+            if self.nuzlocke_view.store.active_run:
+                self.nuzlocke_view.auto_record_acquisitions.setChecked(value == "AUTOMATIC")
+            self.nuzlocke_view.refresh_acquisition_suggestions()
+        self.preferences_view.refresh()
+
+        if key in {"bizhawk_save_ram_directory", "bizhawk_state_directory", "bizhawk_save_name"}:
+            if key == "bizhawk_save_ram_directory":
+                self.pc_save_offset_directory_edit.setText(value)
+            self.save_backup_service.request_backup()
+
+    def _reset_preferences(self) -> None:
+        from dataclasses import fields
+
+        from pokemon_ev_tracker.config.settings import AppSettings
+        if QMessageBox.question(self, "Reset preferences", "Restore companion settings defaults? Saved runs and Pokémon EV preferences are preserved.") != QMessageBox.StandardButton.Yes:
+            return
+        defaults = AppSettings()
+        for field in fields(defaults):
+            setattr(self.settings, field.name, getattr(defaults, field.name))
+        if self.friendship_walk.active or self._friendship_walk_pending_sequence is not None:
+            self._stop_friendship_walk()
+        self.friendship_walk_axis.setCurrentIndex(0)
+        self.friendship_walk_group.set_goal(160)
+        self.nuzlocke_view.wipe_action_input.setCurrentIndex(0)
+        self.nuzlocke_view.no_run_prompt_input.setChecked(True)
+        self.tracker_view = "training"
+        self.shell._tracker_route = "training"
+        self._preference_changed("always_on_top", False)
+        self._preference_changed("advanced_diagnostics", False)
+        self.preferences_view.refresh()
+
+    def _retry_connection(self) -> None:
+        self.ram_data_source.start()
+        self._refresh_ram_backend_debug()
 
     def _edit_training_focus(self, slot: int) -> None:
         card = self.tracker_party_cards.get(slot, {})
@@ -636,19 +791,22 @@ class MainWindow(QMainWindow):
         self._refresh_party_workspaces()
 
     def set_route(self, route: str, persist: bool = True) -> None:
-        if route not in {"training", "stats", "nuzlocke", "diagnostics"}:
+        if route not in {"training", "stats", "box", "nuzlocke", "diagnostics", "settings"}:
             raise ValueError(f"Unknown workspace: {route}")
-        if self.compact_mode and route == "diagnostics":
-            route = self.tracker_view
+        if self.compact_mode:
+            route = "training"
         if persist and self.compact_mode:
             self._compact_return_route = None
         self.route = route
-        if route in {"training", "stats"}:
+        if route in {"training", "stats", "box"}:
             self.tracker_view = route
             if persist:
                 self.settings.tracker_view = route
         self.shell.show_route(route)
-        self.ev_change_log.setVisible(route == "training")
+        self.diagnostics_view.advanced_toggle.setVisible(route == "diagnostics" and not self.compact_mode)
+        if route == "settings":
+            self.preferences_view.refresh()
+        self.ev_change_log.setVisible(route == "training" and not self.compact_mode)
         if persist:
             self.settings.workspace_view = route
             self.settings.save_default()
@@ -659,6 +817,9 @@ class MainWindow(QMainWindow):
         self.nuzlocke_view.show_section(section)
 
     def _review_detection(self) -> None:
+        if self._pending_wipe is not None:
+            self._review_pending_wipe()
+            return
         self._expand_nuzlocke(
             "Deaths" if not self.nuzlocke_view.ram_death_group.isHidden() else "Encounters")
 
@@ -747,6 +908,10 @@ class MainWindow(QMainWindow):
         if self.friendship_walk.active or self._friendship_walk_pending_sequence is not None:
             self._stop_friendship_walk()
         self._walk_target_reached = True
+        if self.settings.notify_friendship:
+            self._connection_notice = "Friendship goal reached. Walking stopped."
+            self._connection_notice_until = time.monotonic() + 8
+            friendship_notice(self)
         self._render_friendship_walk()
 
     def _start_friendship_walk(self) -> None:
@@ -1111,36 +1276,49 @@ class MainWindow(QMainWindow):
         self._set_compact_mode(bool(enabled), persist=True)
 
     def set_tracker_view(self, view: str, persist: bool = True) -> None:
-        if view not in {"training", "stats"}:
-            raise ValueError("Tracker view must be 'training' or 'stats'.")
+        if view not in {"training", "stats", "box"}:
+            raise ValueError("Unknown Tracker view.")
         self.set_route(view, persist=persist)
 
     def _set_compact_mode(self, enabled: bool, persist: bool = True, initial: bool = False) -> None:
+        if enabled and not self._training_party_connected and not initial:
+            return
         if enabled == self.compact_mode and not initial:
             return
         was_visible = self.isVisible()
         self._changing_mode = True
         route = self.route
-        if enabled and route == "diagnostics":
+        if enabled and route != "training":
             self._compact_return_route = route
-            route = self.tracker_view
+            route = "training"
         elif not enabled and self._compact_return_route:
             route = self._compact_return_route
             self._compact_return_route = None
         if enabled and not initial:
             self.settings.normal_window_geometry = self._current_window_geometry()
+        elif self.compact_mode and not initial:
+            self._compact_geometry = self._current_window_geometry()
+        previous_mode = self.compact_mode
         self.compact_mode = enabled
-        self.setMinimumSize(QSize(320, 300) if enabled else QSize(620, 480))
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
+        if enabled != previous_mode:
+            apply_theme(self)
+        self.setMinimumSize(QSize(320, 300) if enabled else QSize(480, 480))
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled or self.settings.always_on_top)
         self.shell.set_compact(enabled)
+        self.current_opponent_panel.set_compact(enabled)
         training = self.compact_training_view if enabled else self.training_view
         training.set_runtime_widgets(
             opponent=self.current_opponent_panel, recommendations=self.recommendation_panel,
             history=self.ev_change_log, friendship=self.friendship_walk_group)
+        self.ev_change_log.setVisible(not enabled)
+        self.friendship_walk_group.setVisible(not enabled and self.provider.capabilities.friendship_walk)
         self.set_route(route, persist=False)
         if not initial:
             if enabled:
-                self._resize_compact_window(self._compact_member_count)
+                if self._compact_geometry is not None and self.settings.remember_geometry:
+                    self.setGeometry(*self._compact_geometry)
+                else:
+                    self._resize_compact_window(self._compact_member_count)
             elif self.settings.normal_window_geometry is not None:
                 self.setGeometry(*self.settings.normal_window_geometry)
         self.ev_change_log.render(self._ev_history_records, enabled)
@@ -1155,24 +1333,26 @@ class MainWindow(QMainWindow):
 
     def _resize_compact_window(self, member_count: int) -> None:
         # Purpose-built HUD geometry is independent of the number of full cards.
-        self.resize(720, 620)
+        self.resize(860, 320)
 
     def _current_window_geometry(self) -> tuple[int, int, int, int]:
         geometry = self.geometry()
         return geometry.x(), geometry.y(), geometry.width(), geometry.height()
 
     def _save_window_state(self) -> None:
-        if self._suspend_geometry_save:
+        if self._suspend_geometry_save or not self.settings.remember_geometry:
             return
         geometry = self._current_window_geometry()
         self.settings.window_geometry = geometry
         if not self.compact_mode:
             self.settings.normal_window_geometry = geometry
-        self.settings.compact_mode = self.compact_mode
         self.settings.save_default()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if getattr(self, "compact_mode", False) and hasattr(self, "compact_training_view"):
+            self.setMinimumHeight(max(300, self.compact_training_view.content.minimumSizeHint().height()
+                                      + self.shell.header.sizeHint().height() + 54))
         if not self._suspend_geometry_save and not self._changing_mode:
             self._geometry_save_timer.start()
 
@@ -1183,6 +1363,22 @@ class MainWindow(QMainWindow):
 
     def _refresh_ram_backend_debug(self) -> None:
         snapshot = self.ram_data_source.snapshot()
+        self.shell.set_connection(snapshot.connected)
+        self.preferences_view.compact_button.setEnabled(snapshot.connected)
+        self.preferences_view.connection.setText("● BizHawk connected" if snapshot.connected else "Waiting for BizHawk")
+        if (self._last_connection is not None and snapshot.connected != self._last_connection
+                and self.settings.notify_connection):
+            self._connection_notice = "BizHawk connection restored." if snapshot.connected else "BizHawk disconnected. Waiting for the Lua heartbeat."
+            self._connection_notice_until = time.monotonic() + 8
+            connection_notice(self, snapshot.connected)
+        self._last_connection = snapshot.connected
+        if snapshot.connected and self._launch_compact_pending:
+            self._launch_compact_pending = False
+            self._training_party_connected = True
+            self._set_compact_mode(True, persist=False)
+        if not snapshot.connected and self.compact_mode:
+            self._launch_compact_pending = True
+            self._set_compact_mode(False, persist=False)
         if "active_enemy_battlers" not in snapshot.details:
             self.backend_status.set_connection(
                 snapshot.backend_name, snapshot.connected, None, None)
@@ -1234,6 +1430,7 @@ class MainWindow(QMainWindow):
             and pc_storage_state.available
             and pc_storage_fresh
         )
+        self.box_view.refresh_storage(pc_storage_state, pc_storage_ready)
         pc_payload_data = (
             pc_storage_payload.payload
             if pc_storage_payload is not None
@@ -1246,7 +1443,7 @@ class MainWindow(QMainWindow):
             else {}
         )
         current_lua_run = party_payload_data.get("run_id") or pc_payload_data.get("lua_run_id")
-        if self.provider.capabilities.pc_storage:
+        if self.provider.capabilities.pc_storage and self.settings.auto_pc_rediscovery:
             self._maybe_auto_discover_pc_layout(
                 snapshot.connected, current_lua_run, pc_payload_data,
                 pc_storage_discovery_progress,
@@ -1355,7 +1552,7 @@ class MainWindow(QMainWindow):
                 self._pc_storage_emitted_box_ids.clear()
                 self._pc_storage_tracking_active = True
                 self._pc_storage_baseline_key = baseline_key
-                LOGGER.info(
+                LOGGER.debug(
                     "PC baseline established: Lua run=%s Nuzlocke run=%s occupied=%s ids=%s",
                     lua_run_id, baseline_key[1], len(self._pc_storage_baseline_ids),
                     sorted(self._pc_storage_baseline_ids),
@@ -1369,6 +1566,40 @@ class MainWindow(QMainWindow):
             )
         new_acquisitions = ()
         try:
+            starter_records = reconcile_initial_starter(
+                party_acquisition_candidates, connected=snapshot.connected,
+                valid_snapshot=party_snapshot_valid, run=acquisition_run,
+                store=self.nuzlocke_view.store,
+            )
+            shinies = reconcile_shiny_encounters(
+                party_acquisition_candidates if party_snapshot_valid else (),
+                connected=snapshot.connected, valid_snapshot=party_snapshot_valid,
+                run=acquisition_run, store=self.nuzlocke_view.store,
+                classify=self.provider.classify_acquisition,
+            )
+            boxed_shinies = reconcile_shiny_encounters(
+                boxed_acquisition_candidates,
+                connected=snapshot.connected, valid_snapshot=pc_storage_acquisition_ready,
+                run=acquisition_run, store=self.nuzlocke_view.store,
+                classify=self.provider.classify_acquisition,
+            )
+            reconciled = starter_records + reconcile_party_encounters(
+                party_acquisition_candidates,
+                connected=snapshot.connected,
+                valid_snapshot=party_snapshot_valid,
+                run=acquisition_run,
+                store=self.nuzlocke_view.store,
+                classify=self.provider.classify_acquisition,
+            )
+            if self.settings.notify_encounters and acquisition_run is not None:
+                for record in reconciled:
+                    candidate = next((c for c in party_acquisition_candidates if c.stable_id == record.stable_id), None)
+                    if candidate is None or not candidate.is_shiny:
+                        recorded_encounter_notice(self, acquisition_run, record, candidate.species_id if candidate else None)
+                for shiny in (*shinies, *boxed_shinies):
+                    shiny_notice(self, acquisition_run, shiny)
+            if reconciled or shinies or boxed_shinies:
+                self.nuzlocke_view._refresh_all()
             party_acquisitions = self._acquisition_observer.observe(
                 party_acquisition_candidates,
                 connected=snapshot.connected,
@@ -1612,12 +1843,7 @@ class MainWindow(QMainWindow):
             + "\n" + self.pc_storage_status_label.text())
         self.compact_nuzlocke_view.rediscover_button.setEnabled(
             self.pc_discover_current_layout_button.isEnabled())
-        self.shell.set_notification(
-            "Fainted Pokémon: review the death notification."
-            if not self.nuzlocke_view.ram_death_group.isHidden() else
-            "New Pokémon: an encounter needs review."
-            if self.nuzlocke_view.store.active_run
-            and self.nuzlocke_view.acquisition_selector.count() else "")
+        refresh_event_notices(self)
         if snapshot.connected:
             self._record_ev_changes(party_state)
 
@@ -1964,7 +2190,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _refresh_tracker_card_sprite(card: dict[str, object], species_id: int) -> bool:
         size = card["sprite_size"]
-        asset = resolve_sprite_asset(species_id)
+        asset = resolve_sprite_asset(species_id, companion=True)
         if (
             card["sprite_species_id"] == species_id
             and card["sprite_loaded_size"] == size
@@ -2052,6 +2278,7 @@ class MainWindow(QMainWindow):
             timer.start(1500)
 
     def _render_ev_history(self) -> None:
+        self.ev_change_log.set_party(self.tracker_party_cards)
         self.ev_change_log.render(self._ev_history_records, self.compact_mode)
 
     def _clear_ev_log(self) -> None:
@@ -2675,12 +2902,12 @@ class MainWindow(QMainWindow):
         )
         LOGGER.info("Save-file PC offset test command dispatched from the UI.")
 
-    @staticmethod
-    def _default_bizhawk_save_ram_directory() -> str:
+    def _default_bizhawk_save_ram_directory(self) -> str:
         configured = os.environ.get("BIZHAWK_SAVE_RAM_DIR")
         candidates = [
+            Path(self.settings.bizhawk_save_ram_directory).expanduser()
+            if self.settings.bizhawk_save_ram_directory else None,
             Path(configured).expanduser() if configured else None,
-            Path.home() / "Downloads" / "BizHawk-2.11.1-win-x64" / "NDS" / "SaveRAM",
         ]
         for candidate in candidates:
             if candidate is not None and candidate.is_dir():
@@ -2695,6 +2922,7 @@ class MainWindow(QMainWindow):
         )
         if directory:
             self.pc_save_offset_directory_edit.setText(directory)
+            self._preference_changed("bizhawk_save_ram_directory", directory)
 
     def _refresh_pc_save_offset_test(self, payload, status) -> None:
         status = status if isinstance(status, dict) else {"status": "idle"}
@@ -3362,17 +3590,14 @@ class MainWindow(QMainWindow):
         )
         self.pc_storage_anchor_recovery.setVisible(anchor_failure)
         if anchor_failure:
-            no_matches = discovery_summary.get("matching_box1_slot1_records_found") == 0
-            self.pc_storage_recovery_label.setText(
-                "PC layout could not be identified. Box 1 Slot 1 may be empty. "
-                "What Pokemon is currently in Box 1 Slot 1?"
-                if no_matches and discovery_summary.get("candidate_records_found") == 0
-                else "PC layout could not be identified. What Pokemon is currently in Box 1 Slot 1?"
-            )
+            self.pc_storage_recovery_label.setText(pc_discovery_failure_message(
+                discovery_summary, session_layout=True,
+            ))
         elif failure:
-            self.pc_storage_recovery_label.setText(
-                "PC layout could not be resolved. Monitoring new boxed catches is paused."
-            )
+            self.pc_storage_recovery_label.setText(pc_discovery_failure_message({
+                **discovery_summary,
+                "resolver_error": discovery.get("pc_storage_resolver_error") or progress.get("error"),
+            }))
         else:
             self.pc_storage_recovery_label.setText("")
         if not connected or not pc_payload:
@@ -3482,7 +3707,10 @@ class MainWindow(QMainWindow):
         self.pc_storage_discovery_status_label.setText("scanning...")
         self.pc_storage_discovery_cancel_button.setEnabled(True)
         LOGGER.info(
-            "Session-local PC layout discovery dispatched: expected=%s species=%s",
+            "Checking PC storage for the current save."
+        )
+        LOGGER.debug(
+            "Manual PC discovery fallback: %s (%s).",
             nickname or "(any nickname)",
             self.pc_layout_species_combo.currentText(),
         )
@@ -4175,7 +4403,7 @@ class MainWindow(QMainWindow):
             and search_anchor == self._pc_search_requested_address
         )
         if is_new_result:
-            LOGGER.info(
+            LOGGER.debug(
                 "UI received PC discovery payload: frame=%s requested=%s "
                 "anchor_result=%s inspection_result=%s search_result=%s anchor=%s",
                 payload_data.get("frame"),
@@ -5225,6 +5453,7 @@ class MainWindow(QMainWindow):
         horizontal.setValue(horizontal_position)
 
     def closeEvent(self, event) -> None:
+        self.save_backup_service.stop()
         self.refresh_timer.stop()
         if hasattr(self, "_geometry_save_timer"):
             self._geometry_save_timer.stop()

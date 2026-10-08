@@ -1,5 +1,7 @@
 # Architecture
 
+The Companion redesign retains these backend boundaries and adds responsive Qt projections. See [the redesign handoff](companion-redesign.md) for the new view modules, persistence decisions, and verification limits.
+
 ```text
 EmuHawk Lua reader
     -> localhost TCP NDJSON or system-temp file fallback

@@ -50,13 +50,27 @@ _ADDITIONAL_LOCATION_IDS = {
     "Ruin Maniac Cave": "platinum-082",
 }
 
+def _area_type(name):
+    """Broad geographic labels, independent of encounter method and availability."""
+    for keyword, caption in (("Route", "Route"), ("Lakefront", "Lakefront"), ("Lake", "Lake"),
+                             ("Cave", "Cave"), ("Forest", "Forest"), ("Ruins", "Ruins"),
+                             ("Town", "Town"), ("City", "City"), ("Island", "Island"),
+                             ("Mountain", "Mountain"), ("Meadow", "Meadow"), ("Marsh", "Marsh")):
+        if keyword in name:
+            return caption
+    return {"Mt. Coronet": "Mountain", "Oreburgh Gate": "Cave", "Oreburgh Mine": "Mine",
+            "Ravaged Path": "Cave", "Old Chateau": "Building", "Snowpoint Temple": "Temple",
+            "Trophy Garden": "Garden", "Victory Road": "Cave"}.get(name, "—")
+
+
 PLATINUM_NUZLOCKE_LOCATIONS = (
-    EncounterLocation(location_id="platinum-starter", name="Starter", order=0),
+    EncounterLocation(location_id="platinum-starter", name="Starter", order=0, area_type="Starter"),
     *(
         EncounterLocation(
             location_id=_LEGACY_LOCATION_IDS.get(name) or _ADDITIONAL_LOCATION_IDS[name],
             name=name,
             order=index + 1,
+            area_type=_area_type(name),
         )
         for index, name in enumerate(_ELIGIBLE_LOCATION_NAMES)
     ),
@@ -124,4 +138,5 @@ PLATINUM_NUZLOCKE_PROFILE = NuzlockeGameProfile(
     locations=PLATINUM_NUZLOCKE_LOCATIONS,
     level_caps=PLATINUM_LEVEL_CAPS,
     retired_default_locations=PLATINUM_RETIRED_DEFAULT_LOCATIONS,
+    region_name="Sinnoh",
 )

@@ -13,10 +13,10 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QBoxLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QProgressBar,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -25,10 +25,15 @@ from PySide6.QtWidgets import (
 
 from pokemon_ev_tracker.core.ev_training import BattleEVRecommendation
 from pokemon_ev_tracker.core.nuzlocke.fights import FightTimeline
-from pokemon_ev_tracker.ui.item_sprite_loader import get_item_sprite
+from pokemon_ev_tracker.ui.compact_training import CompactTrainingView  # noqa: F401
+from pokemon_ev_tracker.ui.inspection_views import PartyStatsView
+
+CompactPartyStatsView = PartyStatsView
+
 from pokemon_ev_tracker.ui.party_card import EV_STAT_LABELS
 from pokemon_ev_tracker.ui.party_selector import PartySelector, PokemonSprite, pokemon_name
 from pokemon_ev_tracker.ui.theme import refresh_style
+from pokemon_ev_tracker.ui.training_focus_card import install_training_focus
 
 SHORT_STATS = dict(zip((key for key, _ in EV_STAT_LABELS), ("HP", "ATK", "DEF", "SPA", "SPD", "SPE")))
 
@@ -73,7 +78,7 @@ class _Identity(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        self.sprite = PokemonSprite(48 if compact else 88)
+        self.sprite = PokemonSprite(48 if compact else 120)
         layout.addWidget(self.sprite)
         details = QVBoxLayout()
         details.setSpacing(3)
@@ -168,73 +173,29 @@ class TrainingView(_PartyWorkspace):
 
     edit_focus_requested = Signal(int)
     clear_focus_requested = Signal(int)
+    focus_stat_requested = Signal(int, str)
 
     def __init__(self, parent=None, *, compact=False) -> None:
         super().__init__(compact=compact, parent=parent)
         self.setObjectName("compactTrainingView" if compact else "trainingView")
         self.body = QWidget()
-        self.body_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, self.body)
+        self.body_layout = QGridLayout(self.body)
         self.body_layout.setContentsMargins(0, 0, 0, 0)
         self.body_layout.setSpacing(10 if compact else 12)
-        self.ev_panel, left = _panel()
-        self.identity = _Identity(compact=compact)
-        left.addWidget(self.identity)
-        title = QHBoxLayout()
-        title.addWidget(_label("EFFORT VALUES", "technicalHeading"))
-        title.addStretch()
-        self.total = _label("— / 510 total", "small")
-        title.addWidget(self.total)
-        left.addLayout(title)
-        self.ev_values, self.ev_rows = {}, {}
-        for stat, name in EV_STAT_LABELS:
-            row = QFrame()
-            row.setProperty("uiRole", "metricRow")
-            row.setProperty("statKey", stat)
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(8, 2 if compact else 9, 8, 2 if compact else 9)
-            row_layout.setSpacing(8)
-            label = _label(SHORT_STATS[stat] if compact else name.upper(), "micro")
-            label.setFixedWidth(30 if compact else 68)
-            value = _label("—", "pokemonMeta" if compact else "metricValue")
-            value.setAlignment(Qt.AlignmentFlag.AlignRight)
-            value.setMinimumWidth(52)
-            row_layout.addWidget(label)
-            row_layout.addStretch(1)
-            row_layout.addWidget(value)
-            left.addWidget(row)
-            self.ev_rows[stat], self.ev_values[stat] = row, value
-        self.focus_title = _label("TRAINING EVS", "technicalHeading")
-        left.addWidget(self.focus_title)
-        focus_row = QHBoxLayout()
-        focus_row.setSpacing(4)
-        self.focus_chips = {}
-        for stat, name in EV_STAT_LABELS:
-            chip = _label(SHORT_STATS[stat], "focusChip")
-            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chip.setToolTip(f"{name} · allowed when selected; otherwise unwanted")
-            focus_row.addWidget(chip, 1)
-            self.focus_chips[stat] = chip
-        left.addLayout(focus_row)
-        self.focus_summary = _label("No focus set", "small", wrap=True)
-        left.addWidget(self.focus_summary)
-        actions = QBoxLayout(QBoxLayout.Direction.LeftToRight)
-        self.actions_layout = actions
-        self.edit_button = QPushButton("Set training focus")
-        self.edit_button.setProperty("buttonRole", "primary")
-        self.clear_button = QPushButton("Clear Focus")
-        self.edit_button.clicked.connect(lambda: self.edit_focus_requested.emit(self.selected_slot))
-        self.clear_button.clicked.connect(lambda: self.clear_focus_requested.emit(self.selected_slot))
-        actions.addWidget(self.edit_button)
-        actions.addWidget(self.clear_button)
-        actions.addStretch(1)
-        left.addLayout(actions)
-        self.ram_state = _label("Waiting for party data", "micro", wrap=True)
-        left.addWidget(self.ram_state)
-        if not compact:
-            left.addStretch(1)
-        self.body_layout.addWidget(self.ev_panel, 3)
+        install_training_focus(self)
+        # One page scroll contains the roster, focus/friendship stack, and battle column.
+        self.layout().removeWidget(self.selector)
+        self.selector.setMaximumWidth(360)
+        self.body_layout.addWidget(self.selector, 0, 0, Qt.AlignmentFlag.AlignTop)
+        self.focus_stack = QWidget()
+        self.focus_stack_layout = QVBoxLayout(self.focus_stack)
+        self.focus_stack_layout.setContentsMargins(0, 0, 0, 0)
+        self.focus_stack_layout.setSpacing(16)
+        self.focus_stack_layout.addWidget(self.ev_panel)
+        self.body_layout.addWidget(self.focus_stack, 0, 1, Qt.AlignmentFlag.AlignTop)
         self.runtime_side = QWidget()
-        side = QVBoxLayout(self.runtime_side)
+        side = QBoxLayout(QBoxLayout.Direction.TopToBottom, self.runtime_side)
+        self.side_layout = side
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(10)
         self.runtime_hosts = {}
@@ -244,24 +205,27 @@ class TrainingView(_PartyWorkspace):
             host_layout = QVBoxLayout(host)
             host_layout.setContentsMargins(0, 0, 0, 0)
             host_layout.setSpacing(0)
+            host_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
             side.addWidget(host)
             self.runtime_hosts[name] = host
         side.addStretch(1)
-        self.body_layout.addWidget(self.runtime_side, 2)
+        self.body_layout.addWidget(self.runtime_side, 0, 2, Qt.AlignmentFlag.AlignTop)
         fight_panel, fight_layout = _panel("raisedPanel")
+        self.fight_panel = fight_panel
+        fight_panel.setParent(self.content)
         fight_layout.addWidget(_label("NEXT FIGHT", "technicalHeading"))
         self.next_fight_name = _label("No active run", "pokemonName")
         self.next_fight_detail = _label("Level cap unavailable", "small")
         fight_layout.addWidget(self.next_fight_name)
         fight_layout.addWidget(self.next_fight_detail)
-        self.content_layout.addWidget(fight_panel)
+        fight_panel.hide()
         self.content_layout.addWidget(self.body)
         friendship = QWidget()
         friendship.setObjectName("friendshipHost")
         friendship_layout = QVBoxLayout(friendship)
         friendship_layout.setContentsMargins(0, 0, 0, 0)
         self.runtime_hosts["friendship"] = friendship
-        self.content_layout.addWidget(friendship)
+        self.focus_stack_layout.addWidget(friendship)
         self.content_layout.addStretch(1)
         self._runtime_widgets = {}
         self._render_selected()
@@ -315,13 +279,21 @@ class TrainingView(_PartyWorkspace):
         allowed_stats = preference.allowed_stats if preference is not None else frozenset()
         evs = getattr(pokemon, "evs", {}) if valid else {}
         self.total.setText(f"{sum(evs.values()) if valid else '—'} / 510 total")
+        self.total_value.setText(str(sum(evs.values())) if valid else "—")
         for stat, _ in EV_STAT_LABELS:
             self.ev_values[stat].setText(str(evs.get(stat, 0)) if valid else "—")
+            self.ev_meters[stat].setValue(evs.get(stat, 0) if valid else 0)
             focused = stat in allowed_stats
             self.focus_chips[stat].setProperty("evFocused", focused)
+            self.focus_chips[stat].blockSignals(True)
+            self.focus_chips[stat].setChecked(focused)
+            self.focus_chips[stat].set_focus(focused)
+            self.focus_chips[stat].setEnabled(valid)
+            self.focus_chips[stat].blockSignals(False)
             refresh_style(self.focus_chips[stat])
         focus = [name for stat, name in EV_STAT_LABELS if stat in allowed_stats]
-        self.focus_summary.setText(" · ".join(focus) if focus else "No focus set")
+        self.saved_check.setVisible(bool(focus) and pokemon is not None)
+        self.focus_summary.setText(f"Preferences saved to {pokemon_name(pokemon)}'s identity" if focus and pokemon else "Select every stat you're happy to gain")
         self.edit_button.setText("Edit training focus" if allowed_stats else "Set training focus")
         self.edit_button.setEnabled(valid)
         self.clear_button.setEnabled(valid and preference is not None)
@@ -340,254 +312,41 @@ class TrainingView(_PartyWorkspace):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        threshold = 700 if self.compact else 850
-        self.body_layout.setDirection(QBoxLayout.Direction.LeftToRight if self.width() >= threshold
-                                      else QBoxLayout.Direction.TopToBottom)
+        self._reflow()
         self.actions_layout.setDirection(
             QBoxLayout.Direction.TopToBottom if self.compact and self.width() < 450
             else QBoxLayout.Direction.LeftToRight
         )
 
-
-class CompactTrainingView(TrainingView):
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent, compact=True)
-        self.ram_state.hide()
-        self.identity.sprite.hide()
-        self.identity.species.hide()
-        self.identity.hp.hide()
-        self.identity.hp_bar.hide()
-        self.ev_panel.layout().setContentsMargins(8, 8, 8, 8)
-        self.ev_panel.layout().setSpacing(4)
-
-
-class PartyStatsView(_PartyWorkspace):
-    """Inspection view with a single identity panel, stats, and four move slots."""
-
-    def __init__(self, parent=None, *, compact=False) -> None:
-        super().__init__(compact=compact, inspection=True, parent=parent)
-        self.setObjectName("compactPartyStatsView" if compact else "partyStatsView")
-        identity_panel, identity_layout = _panel()
-        self.identity_row = QBoxLayout(QBoxLayout.Direction.LeftToRight)
-        self.identity_row.setSpacing(12)
-        self.identity = _Identity(compact=compact)
-        self.identity_row.addWidget(self.identity, 3)
-        item_panel, item_layout = _panel("raisedPanel")
-        item_row = QHBoxLayout()
-        self.item_icon = QLabel()
-        self.item_icon.setFixedSize(30 if compact else 42, 30 if compact else 42)
-        self.item_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        item_row.addWidget(self.item_icon)
-        item_copy = QVBoxLayout()
-        item_copy.addWidget(_label("HELD ITEM", "micro"))
-        self.item_name = _label("—", "heldItem", wrap=True)
-        item_copy.addWidget(self.item_name)
-        item_row.addLayout(item_copy, 1)
-        item_layout.addLayout(item_row)
-        self.identity_row.addWidget(item_panel, 2)
-        facts, facts_layout = _panel("raisedPanel")
-        self.nature = _label("Nature —", "pokemonMeta", wrap=True)
-        self.ability = _label("Ability —", "small", wrap=True)
-        self.friendship = _label("Friendship — / 255", "small", wrap=True)
-        self.friendship_bar = _bar(255)
-        self.friendship_bar.setProperty("uiRole", "friendshipBar")
-        for widget in (self.nature, self.ability, self.friendship, self.friendship_bar):
-            facts_layout.addWidget(widget)
-        self.identity_row.addWidget(facts, 3)
-        identity_layout.addLayout(self.identity_row)
-        self.content_layout.addWidget(identity_panel)
-        self.mid = QWidget()
-        self.mid_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight, self.mid)
-        self.mid_layout.setContentsMargins(0, 0, 0, 0)
-        self.mid_layout.setSpacing(12)
-        self.stats_panel, stats_layout = _panel()
-        stats_layout.addWidget(_label("STATS / IV" if compact else "BATTLE STATS + IVS", "technicalHeading"))
-        self.stat_values, self.iv_values, self.stat_bars, self.stat_names = {}, {}, {}, {}
-        for stat, name in EV_STAT_LABELS:
-            row, row_layout = _panel("metricRow")
-            row_layout.setContentsMargins(8, 3 if compact else 9, 8, 3 if compact else 9)
-            contents = QHBoxLayout()
-            label = _label(SHORT_STATS[stat] if compact else name.upper(), "micro")
-            label.setMinimumWidth(30 if compact else 65)
-            value = _label("—", "pokemonMeta" if compact else "metricValue")
-            meter = _bar(stat=stat)
-            iv = _label("— IV", "small" if compact else "inspectionValue")
-            iv.setAlignment(Qt.AlignmentFlag.AlignRight)
-            contents.addWidget(label)
-            contents.addWidget(value)
-            contents.addWidget(meter, 1)
-            contents.addWidget(iv)
-            row_layout.addLayout(contents)
-            stats_layout.addWidget(row)
-            self.stat_values[stat], self.iv_values[stat] = value, iv
-            self.stat_bars[stat], self.stat_names[stat] = meter, label
-            meter.setVisible(not compact)
-        stats_layout.addStretch(1)
-        self.mid_layout.addWidget(self.stats_panel, 2)
-        self.moves_panel, moves_layout = _panel()
-        moves_layout.addWidget(_label("MOVES · FOUR SLOTS", "technicalHeading"))
-        self.move_names, self.move_details = [], []
-        self.move_types, self.move_categories, self.move_pp, self.move_cards = [], [], [], []
-        for slot in range(4):
-            move, move_layout = _panel("moveCard")
-            move_layout.setContentsMargins(9, 6 if compact else 9, 9, 6 if compact else 9)
-            move_layout.setSpacing(3)
-            name = _label(f"{slot + 1:02d}  Empty move slot", "pokemonMeta", wrap=True)
-            pp = _label("", "inspectionValue")
-            pp.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            title = QHBoxLayout()
-            title.addWidget(name, 1)
-            title.addWidget(pp)
-            move_layout.addLayout(title)
-            badges = QHBoxLayout()
-            move_type = _label("", "moveTypeBadge")
-            category = _label("", "moveCategoryBadge")
-            badges.addWidget(move_type)
-            badges.addWidget(category)
-            badges.addStretch(1)
-            move_layout.addLayout(badges)
-            details = _label("", "micro", wrap=True)
-            move_layout.addWidget(details)
-            if compact:
-                details.hide()
-                category.hide()
-            moves_layout.addWidget(move)
-            self.move_names.append(name)
-            self.move_details.append(details)
-            self.move_types.append(move_type)
-            self.move_categories.append(category)
-            self.move_pp.append(pp)
-            self.move_cards.append(move)
-        moves_layout.addStretch(1)
-        self.mid_layout.addWidget(self.moves_panel, 3)
-        self.content_layout.addWidget(self.mid)
-        snapshot, snapshot_layout = _panel()
-        snapshot_heading = QHBoxLayout()
-        snapshot_heading.addWidget(_label("EV SNAPSHOT", "technicalHeading"))
-        if not compact:
-            snapshot_heading.addWidget(_label("Factual values", "micro"))
-        snapshot_heading.addStretch(1)
-        self.ev_total = _label("— / 510", "small")
-        snapshot_heading.addWidget(self.ev_total)
-        snapshot_layout.addLayout(snapshot_heading)
-        snapshot_values = QHBoxLayout()
-        snapshot_values.setSpacing(5)
-        self.ev_values = {}
-        for stat, _ in EV_STAT_LABELS:
-            column = QVBoxLayout()
-            column.setSpacing(2)
-            column.addWidget(_label(SHORT_STATS[stat], "micro"))
-            value = _label("—", "metricValue")
-            value.setProperty("statKey", stat)
-            column.addWidget(value)
-            snapshot_values.addLayout(column, 1)
-            self.ev_values[stat] = value
-        snapshot_layout.addLayout(snapshot_values)
-        self.ram_state = _label("Waiting for party data", "micro", wrap=True)
-        snapshot_layout.addWidget(self.ram_state)
-        self.content_layout.addWidget(snapshot)
-        self.content_layout.addStretch(1)
-        if compact:
-            self.item_icon.hide()
-            self.friendship_bar.hide()
-            self.identity.hp_bar.hide()
-            self.ram_state.hide()
-            item_layout.setContentsMargins(8, 6, 8, 6)
-            facts_layout.setContentsMargins(8, 6, 8, 6)
-            facts_layout.setSpacing(3)
-            for layout in (identity_layout, stats_layout, moves_layout, snapshot_layout):
-                layout.setContentsMargins(8, 8, 8, 8)
-                layout.setSpacing(4)
-        self._render_selected()
-
-    def _render_selected(self) -> None:
-        if not hasattr(self, "identity"):
+    def _reflow(self):
+        if not hasattr(self, "focus_stack"):
             return
-        card = self._selected_card()
-        pokemon = card.get("pokemon")
-        self.identity.refresh(pokemon)
-        valid = pokemon is not None and getattr(pokemon, "checksum_valid", False)
-        self.item_name.setText(_text(card, "item_name") if valid else "—")
-        self.item_icon.clear()
-        if valid:
-            self.item_icon.setPixmap(get_item_sprite(getattr(pokemon, "held_item_name", None), 30))
-        nature = getattr(pokemon, "nature_name", "—") if valid else "—"
-        increased = getattr(pokemon, "nature_increased_stat", None) if valid else None
-        decreased = getattr(pokemon, "nature_decreased_stat", None) if valid else None
-        change = (f" · +{SHORT_STATS.get(increased, increased)} −{SHORT_STATS.get(decreased, decreased)}"
-                  if increased and decreased else "")
-        self.nature.setText(f"{nature}{change}" if self.compact else f"Nature · {nature}{change}")
-        ability = (getattr(pokemon, "ability_name", None) or f"Unknown #{pokemon.ability_id}") if valid else "—"
-        self.ability.setText(f"Ability · {ability}")
-        friendship = getattr(pokemon, "friendship", None) if valid else None
-        self.friendship.setText(f"Friendship {friendship if friendship is not None else '—'} / 255")
-        self.friendship_bar.setValue(friendship or 0)
-        values = card.get("stat_values", {})
-        numeric = [int(label.text()) for label in values.values() if label.text().isdigit()]
-        scale = max(numeric, default=1)
-        for stat, _ in EV_STAT_LABELS:
-            value = values.get(stat)
-            text = value.text() if value is not None and pokemon is not None else "—"
-            self.stat_values[stat].setText(text)
-            iv = card.get("iv_values", {}).get(stat)
-            self.iv_values[stat].setText(f"{iv.text() if valid and iv is not None else '—'} IV")
-            self.iv_values[stat].setToolTip("Individual value · 0–31")
-            self.stat_bars[stat].setRange(0, scale)
-            self.stat_bars[stat].setValue(int(text) if text.isdigit() else 0)
-            self.stat_bars[stat].setToolTip("Relative to this Pokémon's highest current battle stat")
-            self.stat_names[stat].setProperty("natureRole", "up" if stat == increased else "down" if stat == decreased else "neutral")
-            refresh_style(self.stat_names[stat])
-            self.ev_values[stat].setText(str(pokemon.evs.get(stat, 0)) if valid else "—")
-        self.ev_total.setText(f"{sum(pokemon.evs.values()) if valid else '—'} / 510")
-        moves = card.get("move_displays", ()) if valid else ()
-        for index, label in enumerate(self.move_names):
-            move = moves[index] if index < len(moves) else None
-            name = (move.name if move is not None else
-                    "Unavailable" if pokemon is not None and not valid else "Empty move slot")
-            label.setText(f"{index + 1:02d}  {name}")
-            type_badge = self.move_types[index]
-            category_badge = self.move_categories[index]
-            pp_label = self.move_pp[index]
-            detail = self.move_details[index]
-            if move is None:
-                type_badge.hide()
-                category_badge.hide()
-                pp_label.clear()
-                detail.clear()
-                self.move_cards[index].setToolTip("")
-                continue
-            type_badge.setText(move.type_name or f"ID {move.move_id}")
-            type_badge.setProperty("moveType", (move.type_name or "unknown").lower())
-            refresh_style(type_badge)
-            type_badge.show()
-            category_badge.setText(move.category or "Unknown")
-            category_badge.setProperty("moveCategory", (move.category or "unknown").lower())
-            refresh_style(category_badge)
-            category_badge.setVisible(not self.compact)
-            pp_text = f"{move.current_pp} / {move.max_pp if move.max_pp is not None else '--'} PP"
-            pp_label.setText(pp_text)
-            power = move.power if move.power is not None else "—"
-            accuracy = f"{move.accuracy}%" if move.accuracy is not None else "—"
-            priority = (f"  ·  Priority {move.priority:+d}" if move.priority else "")
-            detail.setText(f"Power {power}  ·  Accuracy {accuracy}{priority}")
-            self.move_cards[index].setToolTip(
-                f"{move.name} · {move.type_name or f'ID {move.move_id}'} · "
-                f"{move.category or 'Unknown'} · {detail.text()} · {pp_text}"
-            )
-        self.ram_state.setText(_text(card, "checksum", "Waiting for party data"))
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.mid_layout.setDirection(QBoxLayout.Direction.LeftToRight if self.width() >= 580
-                                     else QBoxLayout.Direction.TopToBottom)
-        self.identity_row.setDirection(QBoxLayout.Direction.LeftToRight
-                                       if self.width() >= (600 if self.compact else 760)
-                                       else QBoxLayout.Direction.TopToBottom)
-
-
-class CompactPartyStatsView(PartyStatsView):
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent, compact=True)
+        for widget in (self.selector, self.focus_stack, self.runtime_side):
+            self.body_layout.removeWidget(widget)
+        for column in range(3):
+            self.body_layout.setColumnStretch(column, 0)
+        if self.width() >= 1280:
+            for column, (widget, stretch) in enumerate(((self.selector, 2), (self.focus_stack, 4), (self.runtime_side, 2))):
+                self.body_layout.addWidget(widget, 0, column, Qt.AlignmentFlag.AlignTop)
+                self.body_layout.setColumnStretch(column, stretch)
+            self.side_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+        elif self.width() >= 760:
+            self.body_layout.addWidget(self.selector, 0, 0, Qt.AlignmentFlag.AlignTop)
+            self.body_layout.addWidget(self.focus_stack, 0, 1, Qt.AlignmentFlag.AlignTop)
+            self.body_layout.addWidget(self.runtime_side, 1, 0, 1, 2, Qt.AlignmentFlag.AlignTop)
+            self.body_layout.setColumnStretch(0, 1)
+            self.body_layout.setColumnStretch(1, 2)
+            self.side_layout.setDirection(QBoxLayout.Direction.LeftToRight)
+        else:
+            for row, widget in enumerate((self.selector, self.focus_stack, self.runtime_side)):
+                self.body_layout.addWidget(widget, row, 0, Qt.AlignmentFlag.AlignTop)
+            self.side_layout.setDirection(QBoxLayout.Direction.TopToBottom)
+            self.body_layout.setColumnStretch(0, 1)
+        self.selector.setMaximumWidth(360 if self.width() >= 760 else 16777215)
+        horizontal = self.side_layout.direction() == QBoxLayout.Direction.LeftToRight
+        for index in range(3):
+            self.side_layout.setStretch(index, 1 if horizontal else 0)
+        self.side_layout.setStretch(3, 0 if horizontal else 1)
 
 
 def _recommendation_reason(result: BattleEVRecommendation) -> str:
@@ -597,7 +356,7 @@ def _recommendation_reason(result: BattleEVRecommendation) -> str:
                                 (result.unwanted_yields, "unwanted")):
         for stat, _name in EV_STAT_LABELS:
             if values.get(stat, 0):
-                parts.append(f"+{values[stat]} {SHORT_STATS[stat]} {description}")
+                parts.append(f"+{values[stat]} {dict(EV_STAT_LABELS)[stat]} {description}")
     return " · ".join(parts) or "No positive EV yield"
 
 
@@ -611,43 +370,61 @@ class RecommendationPanel(QFrame):
         self._active_slots = set()
         self.results: dict[int, BattleEVRecommendation] = {}
         self.setProperty("uiRole", "panel")
+        self.setObjectName("partyReadout")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(5)
-        self.heading = _label("PARTY RECOMMENDATIONS", "technicalHeading")
-        layout.addWidget(self.heading)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        header = QWidget()
+        header.setFixedHeight(40)
+        header_row = QHBoxLayout(header)
+        header_row.setContentsMargins(12, 0, 12, 0)
+        self.heading = _label("PARTY READOUT", "trainingMicro")
+        header_row.addWidget(self.heading, 1)
+        header_row.addWidget(_label("Against active foe", "readoutDetail"))
+        layout.addWidget(header)
         self.empty = _label("Waiting for live party data", "emptyState", wrap=True)
         layout.addWidget(self.empty)
         self.rows = {}
         for slot in range(1, 7):
             row = QFrame()
-            row.setProperty("uiRole", "metricRow")
+            row.setObjectName("readoutRow")
+            row.setFixedHeight(50)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(5, 3, 5, 3)
+            row_layout.setContentsMargins(12, 0, 12, 0)
             row_layout.setSpacing(6)
-            sprite = PokemonSprite(24)
-            name = _label("", "slotName", wrap=True)
+            sprite = PokemonSprite(34, padding=0, reference_art=True, reference_bounds=(26, 34))
+            name = _label("", "readoutName", wrap=True)
             name.setMinimumWidth(35)
-            badge = _label("", "statusBadge")
+            badge = _label("", "readoutBadge")
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            detail = _label("", "micro", wrap=True)
+            badge.setFixedHeight(18)
+            detail = _label("", "readoutDetail", wrap=True)
             row_layout.addWidget(sprite)
-            row_layout.addWidget(name, 2)
+            copy_widget = QWidget()
+            copy_widget.setFixedHeight(34)
+            copy = QVBoxLayout(copy_widget)
+            copy.setContentsMargins(0, 0, 0, 0)
+            copy.setSpacing(2)
+            name.setFixedHeight(18)
+            detail.setFixedHeight(14)
+            copy.addWidget(name)
+            copy.addWidget(detail)
+            row_layout.addWidget(copy_widget, 1, Qt.AlignmentFlag.AlignVCenter)
             row_layout.addWidget(badge)
-            row_layout.addWidget(detail, 3)
             layout.addWidget(row)
             self.rows[slot] = (row, sprite, name, badge, detail)
             row.hide()
         self.note = _label("Allowed training EVs · items and Pokérus may alter gains.", "micro", wrap=True)
         layout.addWidget(self.note)
+        self.note.hide()
 
     def set_compact(self, compact: bool, selected_slot: int = 1) -> None:
         self._compact = compact
         self._selected_slot = selected_slot
         self.heading.setVisible(not compact)
-        self.note.setVisible(not compact)
+        self.note.hide()
         self.setToolTip("Recommendations use allowed training EVs; items and Pokérus may alter gains.")
-        self.layout().setContentsMargins(*((6, 4, 6, 4) if compact else (10, 10, 10, 10)))
+        self.layout().setContentsMargins(*((6, 4, 6, 4) if compact else (1, 1, 1, 1)))
         for slot, (row, sprite, name, _badge, _detail) in self.rows.items():
             row.setVisible(slot in self._active_slots and (not compact or slot == selected_slot))
             sprite.setVisible(not compact)

@@ -10,6 +10,7 @@ from pokemon_ev_tracker.pokemon.gen4.crypto import (
     calculate_checksum,
     decrypt_box_data,
     shuffle_index,
+    unshuffle_blocks,
     xor_words,
 )
 from pokemon_ev_tracker.pokemon.gen4.ivs import IndividualValues, decode_individual_values
@@ -111,6 +112,8 @@ class PokemonDiagnostics:
     battle_stats_decrypted_hex: str
     battle_stats_valid: bool
     battle_stats_error: str | None
+    box_data_state: str = "encrypted"
+    battle_data_state: str = "encrypted"
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,7 @@ class DecodedPokemon:
     stable_id: str
     acquisition_metadata_diagnostics: AcquisitionMetadataDiagnostics
     diagnostics: PokemonDiagnostics
+    is_shiny: bool = False
 
 
 @dataclass(frozen=True)
@@ -205,11 +209,21 @@ class DecodedBoxPokemon:
     address: int | None
     shuffle_index: int
     block_order: str
+    held_item_id: int | None = None
+    friendship: int | None = None
+    ability_id: int | None = None
+    ivs: IndividualValues | None = None
+    nature_name: str | None = None
+    nature_increased_stat: str | None = None
+    nature_decreased_stat: str | None = None
+    is_shiny: bool = False
 
 
 def decode_party_pokemon(
     data: bytes,
     address: int | None = None,
+    *,
+    allow_decrypted_ram: bool = False,
 ) -> DecodedPokemon:
     if len(data) < PARTY_POKEMON_SIZE:
         raise ValueError("Party Pokemon record must be 236 bytes.")
@@ -218,9 +232,30 @@ def decode_party_pokemon(
     checksum = int.from_bytes(data[0x06:0x08], "little")
     decrypted = decrypt_box_data(data[0x08 : 0x08 + BOX_DATA_SIZE], pid, checksum)
     calculated_checksum = calculate_checksum(decrypted)
+    box_data_state = "encrypted"
+    # Platinum's GetValue temporarily decrypts RAM without setting its context
+    # flags. Accept that representation only if its original checksum matches;
+    # never repair a checksum or reconstruct a partially transformed record.
+    raw_box = data[0x08 : 0x08 + BOX_DATA_SIZE]
+    if allow_decrypted_ram and calculated_checksum != checksum and calculate_checksum(raw_box) == checksum:
+        plain = unshuffle_blocks(raw_box, pid)
+        if 1 <= int.from_bytes(plain[:2], "little") <= 493:
+            decrypted = plain
+            calculated_checksum = checksum
+            box_data_state = "decrypted"
     checksum_valid = calculated_checksum == checksum
     battle_stats_raw = data[0x88:0x9C]
     battle_stats = xor_words(battle_stats_raw, pid)
+    battle_data_state = "encrypted"
+    # The party tail may be transformed before or after the box blocks. Prefer
+    # the verified context's plain tail only when all existing stats checks pass.
+    if (
+        allow_decrypted_ram and checksum_valid
+        and _validate_battle_stats(*_battle_values(battle_stats_raw)) is None
+        and (box_data_state == "decrypted" or _validate_battle_stats(*_battle_values(battle_stats)) is not None)
+    ):
+        battle_stats = battle_stats_raw
+        battle_data_state = "decrypted"
 
     species_id = int.from_bytes(decrypted[0x00:0x02], "little")
     held_item_id = int.from_bytes(
@@ -279,17 +314,7 @@ def decode_party_pokemon(
     met_date = tuple(raw_met_date) if len(raw_met_date) == 3 and any(raw_met_date) else None
     trainer_id = int.from_bytes(decrypted[0x04:0x06], "little")
     secret_id = int.from_bytes(decrypted[0x06:0x08], "little")
-    level = battle_stats[0x04]
-    current_hp = int.from_bytes(battle_stats[0x06:0x08], "little")
-    max_hp = int.from_bytes(battle_stats[0x08:0x0A], "little")
-    current_stats = CurrentStats(
-        max_hp=max_hp,
-        attack=int.from_bytes(battle_stats[0x0A:0x0C], "little"),
-        defense=int.from_bytes(battle_stats[0x0C:0x0E], "little"),
-        speed=int.from_bytes(battle_stats[0x0E:0x10], "little"),
-        special_attack=int.from_bytes(battle_stats[0x10:0x12], "little"),
-        special_defense=int.from_bytes(battle_stats[0x12:0x14], "little"),
-    )
+    level, current_hp, max_hp, current_stats = _battle_values(battle_stats)
     battle_stats_error = _validate_battle_stats(level, current_hp, max_hp, current_stats)
 
     return DecodedPokemon(
@@ -322,6 +347,7 @@ def decode_party_pokemon(
         met_date=met_date,
         is_egg=ivs.is_egg,
         stable_id=f"pid:{pid:08X}:ot:{trainer_id:04X}:{secret_id:04X}",
+        is_shiny=(trainer_id ^ secret_id ^ (pid & 0xFFFF) ^ (pid >> 16)) < 8,
         acquisition_metadata_diagnostics=AcquisitionMetadataDiagnostics(
             met_location_record_offset=MET_LOCATION_EXTENDED_RECORD_OFFSET,
             met_location_box_data_offset=MET_LOCATION_EXTENDED_BOX_DATA_OFFSET,
@@ -349,6 +375,8 @@ def decode_party_pokemon(
             battle_stats_decrypted_hex=battle_stats.hex(" ").upper(),
             battle_stats_valid=battle_stats_error is None,
             battle_stats_error=battle_stats_error,
+            box_data_state=box_data_state,
+            battle_data_state=battle_data_state,
         ),
     )
 
@@ -372,6 +400,7 @@ def decode_box_pokemon(data: bytes, address: int | None = None) -> DecodedBoxPok
     trainer_id = int.from_bytes(decrypted[0x04:0x06], "little")
     secret_id = int.from_bytes(decrypted[0x06:0x08], "little")
     met_level_value = decrypted[MET_LEVEL_BOX_DATA_OFFSET] & 0x7F
+    nature = nature_from_pid(pid)
 
     return DecodedBoxPokemon(
         species_id=int.from_bytes(decrypted[0x00:0x02], "little"),
@@ -397,6 +426,7 @@ def decode_box_pokemon(data: bytes, address: int | None = None) -> DecodedBoxPok
         met_level=met_level_value or None,
         is_egg=ivs.is_egg,
         stable_id=f"pid:{pid:08X}:ot:{trainer_id:04X}:{secret_id:04X}",
+        is_shiny=(trainer_id ^ secret_id ^ (pid & 0xFFFF) ^ (pid >> 16)) < 8,
         pid=pid,
         checksum=checksum,
         calculated_checksum=calculated_checksum,
@@ -404,7 +434,27 @@ def decode_box_pokemon(data: bytes, address: int | None = None) -> DecodedBoxPok
         address=address,
         shuffle_index=shuffle_index(pid),
         block_order=block_order(pid),
+        held_item_id=int.from_bytes(decrypted[HELD_ITEM_BOX_DATA_OFFSET:HELD_ITEM_BOX_DATA_OFFSET + 2], "little"),
+        friendship=decrypted[FRIENDSHIP_BOX_DATA_OFFSET],
+        ability_id=decrypted[ABILITY_BOX_DATA_OFFSET],
+        ivs=ivs,
+        nature_name=nature.name,
+        nature_increased_stat=nature.increased_stat,
+        nature_decreased_stat=nature.decreased_stat,
     )
+
+
+def _battle_values(data: bytes) -> tuple[int, int, int, CurrentStats]:
+    maximum = int.from_bytes(data[0x08:0x0A], "little")
+    stats = CurrentStats(
+        max_hp=maximum,
+        attack=int.from_bytes(data[0x0A:0x0C], "little"),
+        defense=int.from_bytes(data[0x0C:0x0E], "little"),
+        speed=int.from_bytes(data[0x0E:0x10], "little"),
+        special_attack=int.from_bytes(data[0x10:0x12], "little"),
+        special_defense=int.from_bytes(data[0x12:0x14], "little"),
+    )
+    return data[0x04], int.from_bytes(data[0x06:0x08], "little"), maximum, stats
 
 
 def _validate_battle_stats(

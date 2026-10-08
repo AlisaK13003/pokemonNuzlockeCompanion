@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -62,6 +64,9 @@ class NewRunDialog(QDialog):
             self.game_input.addItem(profile.display_name, profile.game_id)
         layout.addRow("Run name", self.name_input)
         layout.addRow("Game", self.game_input)
+        self.active_run_notice = QLabel("Existing party and PC Pokémon are baselined when live monitoring resumes.")
+        self.active_run_notice.setWordWrap(True)
+        layout.addRow(self.active_run_notice)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -74,6 +79,45 @@ class NewRunDialog(QDialog):
     def values(self) -> tuple[str, NuzlockeGameProfile]:
         profile = next(profile for profile in self.profiles if profile.game_id == self.game_input.currentData())
         return self.name_input.text(), profile
+
+
+class FinishRunDialog(QDialog):
+    def __init__(self, run_name, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Finish run")
+        self.resize(600, 380)
+        layout = QVBoxLayout(self)
+        _heading(layout, f"Finish {run_name}", "Choose how this run ended. Encounters, deaths and notes will be preserved in the library.")
+        self.outcome = QComboBox()
+        self.outcome.hide()
+        choices = QHBoxLayout()
+        group = QButtonGroup(self)
+        self.outcome_buttons = []
+        for title, value in (("Won — final challenge completed", "WON"), ("Wiped — active party defeated", "WIPED"), ("Abandoned — ended without a win or wipe", "ABANDONED")):
+            self.outcome.addItem(title, value)
+            name, description = title.split(" — ")
+            button = QPushButton(f"{name.upper()}\n{description}")
+            button.setCheckable(True)
+            button.setMinimumHeight(76)
+            button.setProperty("buttonRole", "segmented")
+            button.setProperty("status", {"WON": "good", "WIPED": "avoid", "ABANDONED": "mixed"}[value])
+            index = len(self.outcome_buttons)
+            button.clicked.connect(lambda checked=False, index=index: self.outcome.setCurrentIndex(index))
+            group.addButton(button)
+            choices.addWidget(button, 1)
+            self.outcome_buttons.append(button)
+        self.outcome.currentIndexChanged.connect(lambda index: self.outcome_buttons[index].setChecked(True))
+        self.outcome_buttons[0].setChecked(True)
+        layout.addLayout(choices)
+        layout.addWidget(QLabel("FINAL RUN NOTES · OPTIONAL"))
+        self.notes = QTextEdit()
+        self.notes.setPlaceholderText("What happened? Add anything you want to remember.")
+        layout.addWidget(self.notes)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Confirm finish run")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class RunHistoryDialog(QDialog):

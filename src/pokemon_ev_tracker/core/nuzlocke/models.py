@@ -30,6 +30,7 @@ class EncounterLocation:
     location_id: str
     name: str
     order: int
+    area_type: str = "—"
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class NuzlockeGameProfile:
     locations: tuple[EncounterLocation, ...]
     level_caps: tuple[LevelCap, ...]
     retired_default_locations: tuple[EncounterLocation, ...] = ()
+    region_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,30 @@ class PokemonAcquisitionEvent:
     source_location: str = "PARTY"
 
 
+@dataclass(frozen=True)
+class ShinyEncounter:
+    stable_id: str
+    species_id: int
+    species_name: str
+    nickname: str
+    level: int | None
+    met_level: int | None
+    location_id: str | None
+    location_name: str
+    source_location: str
+    detected_at: str
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.stable_id or not 1 <= self.species_id <= 493:
+            raise ValueError("A shiny encounter needs a valid identity and species.")
+        for level in (self.level, self.met_level):
+            if level is not None and (isinstance(level, bool) or not 1 <= level <= 100):
+                raise ValueError("Shiny encounter levels must be between 1 and 100.")
+        if self.source_location not in {"PARTY", "BOX", "MANUAL"}:
+            raise ValueError("Unknown shiny encounter source.")
+
+
 @dataclass
 class NuzlockeRun:
     run_id: str
@@ -148,6 +174,8 @@ class NuzlockeRun:
     resolved_acquisition_ids: list[str] = field(default_factory=list)
     auto_record_unambiguous_encounters: bool = False
     automatically_confirm_deaths: bool = False
+    shiny_encounters: list[ShinyEncounter] = field(default_factory=list)
+    starter_observation_complete: bool = False
 
     @property
     def started_at(self) -> str:

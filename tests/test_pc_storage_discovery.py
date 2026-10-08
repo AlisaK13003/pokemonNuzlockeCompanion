@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import time
 from pathlib import Path
 
@@ -167,7 +168,7 @@ def test_lua_discovery_is_chunked_and_has_no_full_ram_read_path() -> None:
     assert 'local PLATINUM_PARTY_RECORDS_OFFSET = 0xD094' in lua_source
     assert '{"party_record_size", PARTY_POKEMON_SIZE}' in lua_source
     assert '{"party_range_valid", party_range_valid}' in lua_source
-    assert 'local LUA_BUILD_ID = "pc-storage-v24-cache-validation"' in lua_source
+    assert 'local LUA_BUILD_ID = "pc-storage-v25-save-table-discovery"' in lua_source
     assert "(math.floor(pid / 0x2000) % 32) % 24" in lua_source
     assert '"cache_validation", JSON.json_raw(validation_diagnostic)' in lua_source
     assert 'local PC_SAVE_COPY_RECORD_OFFSETS = {0x0C104, 0x4C104}' in lua_source
@@ -644,6 +645,54 @@ def test_hex_chunk_json_round_trips_arbitrary_ram_bytes() -> None:
     assert all(character in "0123456789ABCDEF" for character in decoded["data"])
 
 
+def test_restart_discards_orphan_chunks_once_and_releases_completed_scan(monkeypatch, caplog):
+    import logging
+
+    server = BizHawkDebugServer()
+    acknowledgements = []
+    monkeypatch.setattr(server, "_acknowledge_pc_discovery_scan",
+                        lambda scan_id, source: acknowledgements.append((scan_id, source)))
+    caplog.set_level(logging.INFO, logger="pokemon_ev_tracker.transport.bizhawk_server")
+    for index in range(1024):
+        server._record_pc_discovery_event({
+            "type": "pc_discovery_chunk", "scan_id": "previous-session-pc-22",
+            "chunk_index": index,
+        }, "file")
+    assert acknowledgements == []
+    assert sum("Discarding leftover PC discovery" in row.message for row in caplog.records) == 1
+    server._record_pc_discovery_event({
+        "type": "pc_discovery_end", "scan_id": "previous-session-pc-22",
+    }, "file")
+    assert acknowledgements == [("previous-session-pc-22", "file")]
+    assert server._pc_discovery_scan is None
+    assert server.latest_pc_storage_discovery_payload() is None
+    assert server.pc_storage_discovery_progress()["status"] == "idle"
+
+
+def test_orphan_completion_preserves_new_scan_and_bounds_notice_cache(monkeypatch):
+    server = BizHawkDebugServer()
+    acknowledgements = []
+    monkeypatch.setattr(server, "_acknowledge_pc_discovery_scan",
+                        lambda scan_id, source: acknowledgements.append((scan_id, source)))
+    server._record_pc_discovery_event(_inspection_start_event("current-scan"), "file")
+    active = server._pc_discovery_scan
+    progress = server.pc_storage_discovery_progress()
+    for index in range(100):
+        server._record_pc_discovery_event({
+            "type": "pc_discovery_chunk", "scan_id": f"old-scan-{index}",
+        }, "file")
+    server._record_pc_discovery_event({
+        "type": "pc_discovery_end", "scan_id": "old-scan-99",
+    }, "file")
+    server._record_pc_discovery_event({
+        "type": "pc_discovery_end", "scan_id": "old\nUNRELATED_COMMAND",
+    }, "file")
+    assert acknowledgements == [("old-scan-99", "file")]
+    assert len(server._inactive_pc_discovery_notices) == 64
+    assert server._pc_discovery_scan is active
+    assert server.pc_storage_discovery_progress() == progress
+
+
 def test_fallback_reader_waits_for_a_complete_ndjson_line(tmp_path: Path) -> None:
     fallback = tmp_path / "bizhawk.jsonl"
     fallback.write_bytes(b"")
@@ -687,7 +736,7 @@ def test_fallback_file_truncation_resets_cursor_without_skipping_new_lines(
     assert server.latest_heartbeat().payload["frame"] == 1
     first_cursor = server._file_position
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         fallback.write_bytes(b"")
         server._poll_log_file(fallback)
     assert "truncated or rotated" in caplog.text
@@ -713,7 +762,7 @@ def test_fallback_file_reset_during_active_discovery_fails_scan_visibly(
     server._poll_log_file(fallback)
     assert server._pc_discovery_scan is not None
 
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("DEBUG"):
         fallback.write_bytes(b"{}")
         server._poll_log_file(fallback)
 
@@ -723,6 +772,19 @@ def test_fallback_file_reset_during_active_discovery_fails_scan_visibly(
     assert "old_size=" in caplog.text
     assert "new_size=2" in caplog.text
     assert "active_scan_id=reset-active" in caplog.text
+    assert "Memory scan interrupted" in caplog.text
+    assert "reload the BizHawk Lua script" in caplog.text
+
+
+def test_idle_log_rotation_is_silent_at_normal_log_level(caplog):
+    import logging
+
+    server = BizHawkDebugServer()
+    with caplog.at_level(logging.INFO):
+        server._handle_fallback_file_reset(19622927, 7861, "truncated", "unknown")
+        server._handle_fallback_file_reset(19622927, 0, "size limit", "Lua fallback writer")
+    assert not caplog.records
+    assert server.pc_storage_discovery_progress()["status"] == "idle"
 
 
 def test_fallback_reader_startup_keeps_trailing_partial_line(tmp_path: Path) -> None:
@@ -962,7 +1024,7 @@ def test_idle_transport_reports_stalled_without_retrying_future_chunk(caplog) ->
     accumulator.last_chunk_received_at = time.monotonic() - 3
     accumulator.last_transport_log_at = time.monotonic() - 2
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         server._check_pc_discovery_retry_timeout()
 
     assert command_socket.sent == []
@@ -1721,6 +1783,99 @@ def test_session_local_layout_resolves_one_expected_box1_anchor() -> None:
             "checksum_valid": True,
         }
     ]
+
+
+def _save_table_fixture():
+    data = bytearray(0x400000)
+    body = 0x20000
+    table = body + 0x20010
+    location = 0
+    for index in range(38):
+        size = 0x30 if index == 1 else 0x590 if index == 2 else 4
+        if index == 37:
+            location, size = 0xD000, 0x121D0
+        struct.pack_into("<IIIHH", data, table + index * 16,
+                         index, size, location, 0, 1 if index == 37 else 0)
+        if index == 2:
+            party = body + location
+            struct.pack_into("<II", data, party, 6, 1)
+        location += size
+    first = body + 0xD000 + 4
+    for box in range(18):
+        struct.pack_into("<HH", data, first + RECORDS_SIZE + box * 40, 0x12C, 0xFFFF)
+    accumulator = PCStorageDiscoveryAccumulator(
+        scan_id="new-save", mode="session_layout", total_bytes=len(data),
+        start_address=MAIN_RAM_BASE, expected_species_id=308, expected_nickname="zen",
+        lua_run_id="current-lua", party_records_address=MAIN_RAM_BASE + party + 8,
+        party_count=1, party_record_size=236, party_range_valid=True,
+    )
+    accumulator.data = data
+    return accumulator, body, first
+
+
+def test_save_table_discovers_verified_empty_pc_without_old_anchor():
+    accumulator, body, first = _save_table_fixture()
+    result = accumulator.finalize()
+    assert result["pc_storage_resolver_method"] == "save_table"
+    assert result["session_pc_first_record_address"] == f"0x{MAIN_RAM_BASE + first:08X}"
+    assert result["session_save_data_body_address"] == f"0x{MAIN_RAM_BASE + body:08X}"
+    assert result["pc_storage_discovery_summary"]["pc_empty"] is True
+    assert result["pc_storage_discovery_summary"]["empty_records"] == 540
+    assert result["expected_box1_slot1"] == {"species_id": None, "nickname": None}
+
+
+def test_save_table_finds_replacement_anchor_and_other_boxes_with_slot_one_empty():
+    accumulator, _, first = _save_table_fixture()
+    for index in (0, 31):
+        record_offset = first + index * RECORD_SIZE
+        accumulator.data[record_offset:record_offset + RECORD_SIZE] = _boxed_record(41, nickname="newmon")
+    result = accumulator.finalize()
+    assert result["expected_box1_slot1"] == {"species_id": 41, "nickname": "newmon"}
+    assert result["pc_storage_discovery_summary"]["valid_occupied_records"] == 2
+    accumulator.data[first:first + RECORD_SIZE] = bytes(RECORD_SIZE)
+    result = accumulator.finalize()
+    assert result["pc_storage_discovery_summary"]["box1_slot1_empty"] is True
+    assert result["pc_storage_discovery_summary"]["pc_empty"] is False
+    assert result["pc_storage_decoded_occupied"][0]["box"] == 2
+
+
+def test_save_table_rejects_random_zero_ram_wrong_party_and_corrupt_records():
+    accumulator, body, first = _save_table_fixture()
+    data = accumulator.data[:]
+    for corrupted in (
+        bytearray(len(data)),
+        data[:body + 0x20010] + bytes(38 * 16) + data[body + 0x20270:],
+    ):
+        accumulator.data = corrupted
+        assert accumulator.finalize()["pc_storage_resolver_status"] == "unresolved"
+    accumulator.data = data
+    accumulator.party_records_address += 4
+    assert accumulator.finalize()["pc_storage_resolver_status"] == "unresolved"
+    accumulator.party_records_address -= 4
+    accumulator.data[first:first + RECORD_SIZE] = bytes([1]) * RECORD_SIZE
+    assert accumulator.finalize()["pc_storage_resolver_status"] == "unresolved"
+
+
+def test_save_table_cache_handoff_and_retry_use_structural_validation_command(monkeypatch, caplog):
+    accumulator, body, first = _save_table_fixture()
+    server = BizHawkDebugServer()
+    server._pc_discovery_scan = accumulator
+    commands = []
+    monkeypatch.setattr(server, "_send_tcp_command", lambda command: commands.append(command) or True)
+    server._finalize_pc_discovery(accumulator, "tcp", 123)
+    expected = f"PC_CACHE_STRUCTURAL_PC|current-lua|{MAIN_RAM_BASE + body:08X}|{MAIN_RAM_BASE + first:08X}\n"
+    assert commands[0] == expected
+    assert server._pc_cache_install["command"] == expected
+    assert server.retry_session_pc_cache_install()
+    assert commands.count(expected) == 2
+    with caplog.at_level("INFO"):
+        server._record_session_pc_cache_result({
+            "type": "pc_storage_cache_ready", "lua_run_id": "current-lua", "accepted": True,
+            "session_pc_first_record_address": f"0x{MAIN_RAM_BASE + first:08X}",
+            "occupied_records": 0, "empty_records": 540, "malformed_records": 0,
+        }, "tcp")
+    assert server.pc_storage_discovery_progress()["status"] == "completed"
+    assert "all 540 slots are empty" in caplog.text
 
 
 def test_session_layout_recognizes_zero_header_with_nonzero_empty_payload() -> None:

@@ -1,7 +1,18 @@
 """Small presentation primitives for the run workspaces."""
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QBoxLayout, QFrame, QLabel, QVBoxLayout, QWidget
+
+
+class RunCount(QLabel):
+    """Pad the displayed count while retaining its numeric text adapter."""
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        painter.setPen(self.palette().windowText().color())
+        painter.drawText(self.contentsRect(), Qt.AlignmentFlag.AlignCenter, self.text().zfill(2))
 
 
 class RunPanel(QFrame):

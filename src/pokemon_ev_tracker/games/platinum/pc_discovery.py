@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 import time
 from array import array
 from collections import Counter
@@ -996,6 +997,10 @@ class PCStorageDiscoveryAccumulator:
             )
             return result
 
+        structural = self._finalize_save_table_layout(excluded_party_records)
+        if structural is not None:
+            return structural
+
         candidates = []
         for hit in self.expected_hits:
             first_offset = hit["offset"]
@@ -1182,6 +1187,95 @@ class PCStorageDiscoveryAccumulator:
         )
         if error:
             result["pc_storage_anchor_error"] = error
+        return result
+
+    def _finalize_save_table_layout(self, excluded_party_records):
+        """Resolve the live SaveData via its page table and active Party pointer.
+
+        SaveDataBody is 0x20000 bytes; pageInfo follows its counters at +0x20010.
+        Page 2 is Party, page 37 is PCBoxes. See pret/pokeplatinum savedata.h.
+        Zero-filled RAM alone is never evidence of an empty PC.
+        """
+        signature = (37).to_bytes(4, "little") + (0x121D0).to_bytes(4, "little")
+        matches = []
+        offset = self.data.find(signature)
+        while offset >= 0:
+            table = offset - 37 * 16
+            body = table - 0x20010
+            if body >= 0 and body % 4 == 0 and table + 38 * 16 <= len(self.data):
+                pages = [struct.unpack_from("<IIIHH", self.data, table + index * 16)
+                         for index in range(38)]
+                valid = all(
+                    page_id == index and size > 0 and size % 4 == 0
+                    and location % 4 == 0 and location + size <= 0x20000
+                    and block == (1 if index == 37 else 0)
+                    for index, (page_id, size, location, _checksum, block) in enumerate(pages)
+                )
+                valid = valid and all(
+                    pages[index][2] + pages[index][1] <= pages[index + 1][2]
+                    for index in range(37)
+                )
+                party = body + pages[2][2]
+                first = body + pages[37][2] + 4
+                tail = first + RECORDS_SIZE
+                valid = (valid and pages[1][1] >= 24 and pages[2][1] >= 8 + 6 * 236
+                         and self.start_address + party + 8 == self.party_records_address
+                         and party + 8 <= len(self.data)
+                         and struct.unpack_from("<II", self.data, party) == (6, self.party_count)
+                         and tail + 18 * 40 + 19 <= len(self.data)
+                         and not self._region_overlaps_party(self.start_address + first, RECORDS_SIZE))
+                if valid:
+                    current_box = int.from_bytes(self.data[first - 4:first], "little")
+                    names = [struct.unpack_from("<20H", self.data, tail + index * 40)
+                             for index in range(18)]
+                    wallpapers = self.data[tail + 720:tail + 738]
+                    valid = (current_box < 18 and all(0xFFFF in name and name[0] != 0xFFFF
+                                                      for name in names)
+                             and all(value < 24 for value in wallpapers))
+                if valid:
+                    occupied = []
+                    for index in range(540):
+                        record_offset = first + index * RECORD_SIZE
+                        raw = bytes(self.data[record_offset:record_offset + RECORD_SIZE])
+                        if _empty_box_record_kind(raw) is not None:
+                            continue
+                        decoded = _decode_occupied(raw, self.start_address + record_offset)
+                        if decoded is None:
+                            valid = False
+                            break
+                        occupied.append(self._record_sample(decoded, index, include_raw=False))
+                    if valid:
+                        matches.append((body, first, occupied, pages))
+            offset = self.data.find(signature, offset + 4)
+        if len(matches) != 1:
+            return None
+        body, first, occupied, pages = matches[0]
+        first_decoded = _decode_occupied(bytes(self.data[first:first + RECORD_SIZE]), self.start_address + first)
+        player = body + pages[1][2]
+        trainer_id = int.from_bytes(self.data[player + 20:player + 24], "little")
+        summary = {
+            "mode": "session_layout", "method": "save_table", "resolved": True,
+            "bytes_scanned": len(self.data), "error": None,
+            "valid_occupied_records": len(occupied), "empty_records": 540 - len(occupied),
+            "invalid_records": 0, "candidate_records_found": self.broad_valid_record_count,
+            "matching_box1_slot1_records_found": len(self.expected_hits),
+            "pc_empty": not occupied, "box1_slot1_empty": first_decoded is None,
+            "save_trainer_id": f"0x{trainer_id:08X}",
+        }
+        result = self._result_payload(summary, [], None, True, excluded_party_records, [])
+        result.update({
+            "pc_storage_session_layout_result": True, "pc_storage_resolver_status": "cache-pending",
+            "pc_storage_resolver_method": "save_table",
+            "session_pc_first_record_address": f"0x{self.start_address + first:08X}",
+            "session_save_data_body_address": f"0x{self.start_address + body:08X}",
+            "session_lua_run_id": self.lua_run_id,
+            "expected_box1_slot1": {
+                "species_id": first_decoded["species_id"] if first_decoded else None,
+                "nickname": first_decoded["nickname"] if first_decoded else None,
+            },
+            "pc_storage_decoded_occupied": occupied,
+            "pc_storage_anchor_raw_hex": self.data[first:first + RECORD_SIZE].hex().upper(),
+        })
         return result
 
     def _finalize_broad(self) -> dict[str, Any]:

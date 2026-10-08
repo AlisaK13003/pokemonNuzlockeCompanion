@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -15,10 +16,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pokemon_ev_tracker.ui.nuzlocke_panels import RunColumns, RunPanel, run_label
+from pokemon_ev_tracker.ui.nuzlocke_panels import RunColumns, RunCount, RunPanel, run_label
 
 
 class RunPages(QStackedWidget):
+    def sizeHint(self):
+        page = self.currentWidget()
+        return page.sizeHint() if page is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        page = self.currentWidget()
+        return page.minimumSizeHint() if page is not None else super().minimumSizeHint()
+
     def __init__(self, navigation: QTabBar, parent=None) -> None:
         super().__init__(parent)
         self.navigation = navigation
@@ -64,15 +73,16 @@ def build_run_workspace(view) -> None:
     view.header_row = QHBoxLayout()
     view.header_row.addLayout(identity, 1)
     header.addLayout(view.header_row)
-    view.metric_strip = QWidget()
+    view.metric_strip = QFrame()
     counts = QHBoxLayout(view.metric_strip)
     counts.setContentsMargins(0, 0, 0, 0)
     view.run_metrics = {}
-    for key, title in (("caught", "Caught"), ("deaths", "Deaths"),
-                       ("failed", "Failed"), ("skipped", "Skipped")):
+    for key, title in (("encounters", "Encounters"), ("caught", "Caught"),
+                       ("deaths", "Deaths"), ("failed", "Failed")):
         metric = RunPanel(title)
         metric.setProperty("uiRole", "raisedPanel")
-        label = run_label("0", "metric")
+        label = RunCount("0")
+        label.setProperty("uiRole", "metric")
         metric.content.addWidget(label)
         view.run_metrics[key] = label
         counts.addWidget(metric)

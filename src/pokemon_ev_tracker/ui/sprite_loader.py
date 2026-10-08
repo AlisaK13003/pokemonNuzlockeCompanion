@@ -12,9 +12,10 @@ from PySide6.QtGui import QImageReader, QPixmap
 ASSET_SPRITE_DIRECTORY = Path(__file__).resolve().parents[1] / "assets" / "sprites"
 STATIC_SPRITE_DIRECTORY = ASSET_SPRITE_DIRECTORY / "gen4"
 ANIMATED_SPRITE_DIRECTORY = ASSET_SPRITE_DIRECTORY / "animated"
-_STATIC_SPRITE_CACHE: dict[tuple[int, int], QPixmap] = {}
+_STATIC_SPRITE_CACHE: dict[tuple[int, int, bool], QPixmap] = {}
 _ANIMATED_PATH_CACHE: dict[int, Path | None] = {}
 _SPRITE_ASSET_CACHE: dict[int, SpriteAsset] = {}
+_COMPANION_ASSET_CACHE: dict[int, SpriteAsset] = {}
 _ANIMATED_SIZE_CACHE: dict[tuple[Path, int], QSize] = {}
 
 
@@ -53,12 +54,21 @@ def get_animated_sprite_path(species_id: int) -> Path | None:
     return _ANIMATED_PATH_CACHE[normalized_id]
 
 
-def resolve_sprite_asset(species_id: int) -> SpriteAsset:
+def resolve_sprite_asset(species_id: int, *, companion: bool = False) -> SpriteAsset:
     """Resolve one cached animated-first asset, falling back to Platinum art."""
     try:
         normalized_id = int(species_id)
     except (TypeError, ValueError):
         return SpriteAsset("missing", None)
+
+    if companion:
+        if normalized_id not in _COMPANION_ASSET_CACHE:
+            path = ASSET_SPRITE_DIRECTORY / "companion" / f"{normalized_id}.gif"
+            _COMPANION_ASSET_CACHE[normalized_id] = (
+                SpriteAsset("animated", path) if path.is_file()
+                else resolve_sprite_asset(normalized_id)
+            )
+        return _COMPANION_ASSET_CACHE[normalized_id]
 
     if normalized_id not in _SPRITE_ASSET_CACHE:
         animated_path = get_animated_sprite_path(normalized_id)
@@ -95,7 +105,7 @@ def get_animated_sprite_size(path: Path, size: int) -> QSize:
     return QSize(_ANIMATED_SIZE_CACHE[key])
 
 
-def get_static_sprite(species_id: int, size: int = 72) -> QPixmap:
+def get_static_sprite(species_id: int, size: int = 72, *, shiny: bool = False) -> QPixmap:
     """Return a cached, nearest-neighbor-scaled sprite or a null pixmap."""
     try:
         normalized_id = int(species_id)
@@ -103,11 +113,12 @@ def get_static_sprite(species_id: int, size: int = 72) -> QPixmap:
     except (TypeError, ValueError):
         return QPixmap()
 
-    key = (normalized_id, normalized_size)
+    key = (normalized_id, normalized_size, shiny)
     if key in _STATIC_SPRITE_CACHE:
         return _STATIC_SPRITE_CACHE[key]
 
-    path = static_sprite_path(normalized_id)
+    path = (STATIC_SPRITE_DIRECTORY / "shiny" / f"{normalized_id}.png"
+            if shiny else static_sprite_path(normalized_id))
     pixmap = QPixmap(str(path)) if normalized_size > 0 and path.is_file() else QPixmap()
     if not pixmap.isNull() and normalized_size > 0:
         pixmap = pixmap.scaled(
@@ -131,4 +142,5 @@ def clear_sprite_cache() -> None:
     _STATIC_SPRITE_CACHE.clear()
     _ANIMATED_PATH_CACHE.clear()
     _SPRITE_ASSET_CACHE.clear()
+    _COMPANION_ASSET_CACHE.clear()
     _ANIMATED_SIZE_CACHE.clear()

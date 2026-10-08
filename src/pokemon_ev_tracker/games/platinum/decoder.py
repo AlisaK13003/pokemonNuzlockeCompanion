@@ -61,6 +61,10 @@ class PartyPokemon:
     sample_stale: bool = False
     battle_stats_stale: bool = False
 
+    @property
+    def is_shiny(self) -> bool:
+        return self.decoded.is_shiny
+
 
 @dataclass(frozen=True)
 class PartyState:
@@ -103,7 +107,8 @@ def decode_party(
     for slot_index in range(party_count):
         start = 4 + (slot_index * PARTY_POKEMON_SIZE)
         address = base_address + start if base_address is not None else None
-        decoded = decode_party_pokemon(raw_party[start : start + PARTY_POKEMON_SIZE], address)
+        decoded = decode_party_pokemon(raw_party[start : start + PARTY_POKEMON_SIZE], address,
+                                       allow_decrypted_ram=True)
         if decoded.species_id == 0:
             continue
         species = species_names.get(decoded.species_id, f"Unknown #{decoded.species_id}")

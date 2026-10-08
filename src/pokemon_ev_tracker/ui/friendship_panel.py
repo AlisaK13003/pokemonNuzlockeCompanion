@@ -2,19 +2,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Signal
 from PySide6.QtWidgets import (
     QBoxLayout,
-    QComboBox,
     QFrame,
-    QHBoxLayout,
     QInputDialog,
-    QLabel,
-    QProgressBar,
-    QPushButton,
-    QSizePolicy,
-    QVBoxLayout,
-    QWidget,
 )
 
 from pokemon_ev_tracker.core.friendship_training import (
@@ -22,7 +14,9 @@ from pokemon_ev_tracker.core.friendship_training import (
     FriendshipETA,
     FriendshipWalkSessionStats,
 )
-from pokemon_ev_tracker.ui.sprite_loader import get_static_sprite
+from pokemon_ev_tracker.ui.party_selector import pokemon_identity
+from pokemon_ev_tracker.ui.theme import refresh_style
+from pokemon_ev_tracker.ui.training_panels import install_friendship
 
 
 def _duration(seconds: float) -> str:
@@ -55,92 +49,7 @@ class FriendshipWalkPanel(QFrame):
         self._members = {}
         self._selected_identity = None
         self._goal = 160
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        self.heading_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
-        heading = QLabel("FRIENDSHIP WALK")
-        heading.setProperty("uiRole", "sectionHeading")
-        self.heading_layout.addWidget(heading, 1)
-        self.status = QLabel("Idle")
-        self.status.setProperty("walkState", "idle")
-        self.status.setWordWrap(True)
-        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.heading_layout.addWidget(self.status, 1)
-        root.addLayout(self.heading_layout)
-
-        self.body = QBoxLayout(QBoxLayout.Direction.LeftToRight)
-        self.body.setSpacing(12)
-        identity = QWidget()
-        identity_layout = QHBoxLayout(identity)
-        identity_layout.setContentsMargins(0, 0, 0, 0)
-        self.sprite = QLabel()
-        self.sprite.setFixedSize(48, 48)
-        self.sprite.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        identity_layout.addWidget(self.sprite)
-        identity_copy = QVBoxLayout()
-        self.selector = QComboBox()
-        self.selector.setMinimumWidth(0)
-        self.selector.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.selector.currentIndexChanged.connect(self._selection_changed)
-        identity_copy.addWidget(self.selector)
-        self.friendship = QLabel("Friendship — / 255")
-        self.friendship.setProperty("uiRole", "muted")
-        identity_copy.addWidget(self.friendship)
-        identity_layout.addLayout(identity_copy, 1)
-        self.body.addWidget(identity, 3)
-
-        goal_box = QWidget()
-        goal_layout = QVBoxLayout(goal_box)
-        goal_layout.setContentsMargins(0, 0, 0, 0)
-        goal_label = QLabel("TARGET")
-        goal_label.setProperty("uiRole", "micro")
-        goal_layout.addWidget(goal_label)
-        self.goal_picker = QComboBox()
-        self.goal_picker.addItem("160 · Training goal", 160)
-        self.goal_picker.addItem("220 · Friendship evolution", 220)
-        self.goal_picker.addItem("255 · Maximum", 255)
-        self.goal_picker.addItem("Custom…", "custom")
-        self.goal_picker.currentIndexChanged.connect(self._goal_selected)
-        goal_layout.addWidget(self.goal_picker)
-        self.body.addWidget(goal_box, 2)
-        root.addLayout(self.body)
-
-        self.progress_text = QLabel("— → 160")
-        self.progress_text.setProperty("uiRole", "pokemonMeta")
-        root.addWidget(self.progress_text)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 160)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        root.addWidget(self.progress)
-        self.telemetry = QLabel("Start walking to calibrate ETA")
-        self.telemetry.setProperty("uiRole", "inspectionValue")
-        root.addWidget(self.telemetry)
-        self.session_gain = QLabel("")
-        self.session_gain.setProperty("uiRole", "small")
-        root.addWidget(self.session_gain)
-        self.moves = QLabel("0 movement · 0 reversals · 0s active")
-        self.moves.setProperty("uiRole", "small")
-        root.addWidget(self.moves)
-        self.controls_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
-        self.axis = QComboBox()
-        self.axis.addItem("Horizontal", "horizontal")
-        self.axis.addItem("Vertical", "vertical")
-        self.controls_layout.addWidget(self.axis)
-        self.start = QPushButton("START WALK")
-        self.start.setProperty("buttonRole", "primary")
-        self.start.setEnabled(False)
-        self.stop = QPushButton("STOP")
-        self.stop.setProperty("buttonRole", "danger")
-        self.stop.setToolTip("Release emulator input immediately · Ctrl+Shift+W")
-        self.controls_layout.addWidget(self.start)
-        self.controls_layout.addWidget(self.stop)
-        self.controls_layout.addStretch(1)
-        root.addLayout(self.controls_layout)
-        self.safety = QLabel("Auto wall reversal · Pauses for battle, stale RAM, link loss, manual input")
-        self.safety.setProperty("uiRole", "small")
-        self.safety.setWordWrap(True)
-        root.addWidget(self.safety)
+        install_friendship(self)
 
     @property
     def selected_identity(self):
@@ -167,6 +76,18 @@ class FriendshipWalkPanel(QFrame):
             self.goal_picker.setItemText(3, "Custom…")
         self.goal_picker.setCurrentIndex(index)
         self.goal_picker.blockSignals(False)
+        for value, button in self.goal_buttons.items():
+            button.setChecked((evolution_goal if value == 220 else value) == target)
+        self.goal_buttons[220].setText(f"{evolution_goal}\nEVOLVE")
+
+    def _choose_goal(self, value):
+        if value == 220:
+            value = self.goal_picker.itemData(1)
+        self.goal_picker.setCurrentIndex(self.goal_picker.findData(value))
+
+    def _axis_changed(self, index):
+        for key, button in self.axis_buttons.items():
+            button.setChecked(key == index)
 
     def _goal_selected(self, index: int) -> None:
         value = self.goal_picker.itemData(index)
@@ -224,24 +145,42 @@ class FriendshipWalkPanel(QFrame):
         self._render_identity()
         self.tracked_changed.emit(identity)
 
+    def select_pokemon(self, pokemon) -> None:
+        """Follow an explicit party selection using the same identity as the walk target."""
+        index = self.selector.findData(pokemon_identity(pokemon))
+        if index >= 0:
+            self.selector.setCurrentIndex(index)
+
     def _render_identity(self) -> None:
         p = self.selected_pokemon
         value = getattr(p, "friendship", None) if getattr(p, "checksum_valid", False) else None
         self.friendship.setText(f"Friendship {value if value is not None else '—'} / 255")
         if p is not None:
-            self.sprite.setPixmap(get_static_sprite(p.species_id, 48))
+            self.sprite.set_species(p.species_id)
+            self.species.setText(p.species)
         else:
-            self.sprite.clear()
+            self.sprite.set_species(None)
+            self.species.setText("—")
 
     def render_training(
         self, *, status: str, current: int | None, target: int,
         eta: FriendshipETA | None, session: FriendshipWalkSessionStats | None,
     ) -> None:
-        self.status.setText(status)
+        walking = status.startswith(("Walking", "Moving", "Blocked"))
+        self.status.setText(status.upper() if walking else status)
+        self.status_indicator.setVisible(walking)
+        self.status.setProperty("walkState", "active" if walking else "idle" if status == "Idle" else "paused")
+        refresh_style(self.status)
         self.progress_text.setText(f"{current if current is not None else '—'} → {target}")
         self.progress.setRange(0, max(1, target))
         self.progress.setValue(min(target, current or 0))
         self.telemetry.setText(_eta_text(eta))
+        self.current_value.setText(str(current) if current is not None else "—")
+        self.target_value.setText(f"/ {target}")
+        self.percentage.setText(f"{min(100, round((current or 0) * 100 / max(1, target)))}% to goal" if current is not None else "— to goal")
+        self.eta_detail.setText("Starts when walking" if eta is None or eta.status is ETAStatus.READY else "Based on this walking session")
+        show_stop = self.stop.isEnabled() and status.startswith(("Walking", "Starting", "Moving", "Blocked", "Paused"))
+        self.action_stack.setCurrentWidget(self.stop if show_stop else self.start)
         self.session_gain.setText(
             f"+{session.friendship_gained} friendship this session" if session else ""
         )
@@ -250,13 +189,15 @@ class FriendshipWalkPanel(QFrame):
             f"{_duration(session.active_seconds)} active" if session else
             "0 movement · 0 reversals · 0s active"
         )
+        self.moves.setVisible(session is not None)
+        self.session_gain.setVisible(session is not None)
         if status in {"Goal reached", "Tracked Pokémon left party"}:
             self.start.setEnabled(False)
 
     def set_compact(self, compact):
         for widget in (self.sprite, self.moves, self.safety):
             widget.setVisible(not compact)
-        self.layout().setContentsMargins(*(8, 6, 8, 6) if compact else (12, 10, 12, 10))
+        self.layout().setContentsMargins(*(8, 6, 8, 6) if compact else (28, 20, 28, 22))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -264,10 +205,10 @@ class FriendshipWalkPanel(QFrame):
             QBoxLayout.Direction.LeftToRight if self.width() > 500 else QBoxLayout.Direction.TopToBottom
         )
         self.controls_layout.setDirection(
-            QBoxLayout.Direction.LeftToRight if self.width() > 330 else QBoxLayout.Direction.TopToBottom
+            QBoxLayout.Direction.LeftToRight if self.width() > 520 else QBoxLayout.Direction.TopToBottom
         )
         self.body.setDirection(
-            QBoxLayout.Direction.LeftToRight if self.width() > 720 else QBoxLayout.Direction.TopToBottom
+            QBoxLayout.Direction.LeftToRight if self.width() > 500 else QBoxLayout.Direction.TopToBottom
         )
 
     def minimumSizeHint(self):

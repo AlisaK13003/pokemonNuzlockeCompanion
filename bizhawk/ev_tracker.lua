@@ -3,7 +3,7 @@
 
 local HOST = "127.0.0.1"
 local PORT = 46387
-local LUA_BUILD_ID = "pc-storage-v24-cache-validation"
+local LUA_BUILD_ID = "pc-storage-v25-save-table-discovery"
 local LUA_GAME_ID = "pokemon-platinum"
 local LUA_GAME_VERSION = "gen4-platinum-us"
 local HEARTBEAT_INTERVAL = 120
@@ -255,6 +255,8 @@ local function clear_session_pc_resolver(reason)
     PCState.session_pc_run_id = nil
     PCState.session_pc_invalid_scans = 0
     PCState.session_pc_expected_species_id = nil
+    PCState.session_save_data_body_address = nil
+    PCState.session_save_identity = nil
 end
 
 SessionState.session_rom_identity = get_rom_session_identity()
@@ -2338,6 +2340,65 @@ local function legacy_pc_storage_page_message(frame, domain)
     return message:gsub('"__PC_RECORDS__"', "[" .. table.concat(record_objects, ",") .. "]")
 end
 
+function PCState.validate_save_table(body, domain)
+    if domain == nil or not main_ram_address_is_valid(body, 0x20270) then
+        return nil, nil, "Save table is outside Main RAM."
+    end
+    local table_address = body + 0x20010
+    local pages = {}
+    for index = 0, 37 do
+        local entry = address_to_domain_offset(table_address + index * 16)
+        local id = read_u32_le(domain, entry)
+        local size = read_u32_le(domain, entry + 4)
+        local location = read_u32_le(domain, entry + 8)
+        local block = read_u16_le(domain, entry + 14)
+        if id ~= index or size == nil or size <= 0 or size % 4 ~= 0
+            or location == nil or location % 4 ~= 0 or location + size > 0x20000
+            or block ~= (index == 37 and 1 or 0) then
+            return nil, nil, "Save table metadata changed or is invalid."
+        end
+        pages[index] = {size = size, location = location}
+        if index > 0 and pages[index - 1].location + pages[index - 1].size > location then
+            return nil, nil, "Save table pages overlap."
+        end
+    end
+    local _, party_address, party_count, party_valid = read_active_party_range(domain)
+    local party = body + pages[2].location
+    if not party_valid or party + 8 ~= party_address or pages[1].size < 24 or pages[2].size < 1424
+        or read_u32_le(domain, address_to_domain_offset(party)) ~= 6
+        or read_u32_le(domain, address_to_domain_offset(party + 4)) ~= party_count
+        or pages[37].size ~= 0x121D0 then
+        return nil, nil, "Save table does not belong to the active party."
+    end
+    local first = body + pages[37].location + 4
+    local tail = first + PC_BOX_RECORDS_BYTES
+    local current_box = read_u32_le(domain, address_to_domain_offset(first - 4))
+    if not main_ram_address_is_valid(first, PC_BOX_RECORDS_BYTES + 739)
+        or current_box == nil or current_box >= 18
+        or not (first + PC_BOX_RECORDS_BYTES <= party_address
+                or first >= party_address + party_count * PARTY_POKEMON_SIZE) then
+        return nil, nil, "PC storage header or range is invalid."
+    end
+    for box = 0, 17 do
+        local name = address_to_domain_offset(tail + box * 40)
+        local terminated = false
+        for index = 0, 19 do
+            if read_u16_le(domain, name + index * 2) == 0xFFFF then
+                terminated = index > 0
+                break
+            end
+        end
+        local wallpaper_pair = read_u16_le(domain, address_to_domain_offset(tail + 720 + box))
+        local wallpaper = wallpaper_pair and wallpaper_pair % 256 or nil
+        if not terminated or wallpaper == nil or wallpaper >= 24 then
+            return nil, nil, "PC box names or wallpapers are invalid."
+        end
+    end
+    local trainer = body + pages[1].location + 4
+    local identity = read_bytes_hex_at_address(domain, trainer, 20)
+    return first, identity, nil
+end
+
 local function pc_storage_message(frame, domain)
     local started_at = os.clock()
     local first_record_address = PCState.session_pc_first_record_address
@@ -2355,6 +2416,18 @@ local function pc_storage_message(frame, domain)
         domain,
         address_to_domain_offset(PLATINUM_PARTY_POINTER_ADDRESS)
     )
+
+    if PCState.session_save_data_body_address ~= nil then
+        local current_first, identity, structural_error = PCState.validate_save_table(
+            PCState.session_save_data_body_address, domain
+        )
+        if current_first ~= first_record_address or identity ~= PCState.session_save_identity then
+            scan_error = structural_error or "Game save changed; rediscovering PC storage."
+            clear_session_pc_resolver(scan_error)
+            address_valid = false
+            rediscovery_required = true
+        end
+    end
 
     if not run_matches and first_record_address ~= nil then
         clear_session_pc_resolver("Lua run ID changed")
@@ -2838,6 +2911,41 @@ local function process_command(line, frame, domain, transport)
 				frame,
 				tostring(transport)
 			))
+		end
+		return
+	end
+	local structural_run, body_hex, structural_address_hex = line:match(
+		"^PC_CACHE_STRUCTURAL_PC|([%w%-]+)|(%x+)|(%x+)$"
+	)
+	if structural_run ~= nil then
+		local body = tonumber(body_hex, 16)
+		local address = tonumber(structural_address_hex, 16)
+		local verified_address, identity, error = PCState.validate_save_table(body, domain)
+		local accepted = structural_run == SessionState.run_id and verified_address == address
+		local installing = accepted
+		local payload, occupied, empty, malformed = nil, 0, 0, 0
+		if accepted then
+			PCState.session_pc_first_record_address = address
+			PCState.session_pc_run_id = SessionState.run_id
+			PCState.session_save_data_body_address = body
+			PCState.session_save_identity = identity
+			PCState.session_pc_invalid_scans = 0
+			payload, accepted, occupied, empty, malformed, error = pc_storage_message(frame, domain)
+			accepted = accepted and occupied + empty == 540
+		end
+		if not accepted and installing then
+			clear_session_pc_resolver(error or "Structural PC cache validation failed.")
+		end
+		emit_pc_discovery_event({
+			{"type", accepted and "pc_storage_cache_ready" or "pc_storage_cache_rejected"},
+			{"lua_run_id", SessionState.run_id}, {"expected_lua_run_id", structural_run},
+			{"session_pc_first_record_address", string.format("0x%08X", address)},
+			{"accepted", accepted}, {"occupied_records", occupied}, {"empty_records", empty},
+			{"malformed_records", malformed},
+			{"error", accepted and nil or error or "Save table or Lua session changed."},
+		}, frame)
+		if accepted and payload ~= nil then
+			send_line(payload, frame)
 		end
 		return
 	end
@@ -3522,6 +3630,7 @@ while true do
             local reads = diagnostic_reads(active_domain)
             local message = JSON.json_object({
                 {"type", "heartbeat"},
+                {"lua_rom_name", try_call(function() return gameinfo.getromname() end, nil)},
                 {"lua_build_id", LUA_BUILD_ID},
                 {"lua_game_id", LUA_GAME_ID},
                 {"lua_game_version", LUA_GAME_VERSION},
@@ -3546,6 +3655,7 @@ while true do
             local reads = diagnostic_reads(active_domain)
             local message = JSON.json_object({
                 {"type", "heartbeat"},
+                {"lua_rom_name", try_call(function() return gameinfo.getromname() end, nil)},
                 {"lua_build_id", LUA_BUILD_ID},
                 {"lua_game_id", LUA_GAME_ID},
                 {"lua_game_version", LUA_GAME_VERSION},

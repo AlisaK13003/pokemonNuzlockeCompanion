@@ -9,7 +9,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QBoxLayout,
     QButtonGroup,
@@ -27,8 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from pokemon_ev_tracker.ui.sprite_loader import get_static_sprite
+from pokemon_ev_tracker.ui.party_selector import PokemonSprite
 from pokemon_ev_tracker.ui.theme import refresh_style
+from pokemon_ev_tracker.ui.training_panels import line_icon
 
 
 def _label(text: str = "", role: str = "muted") -> QLabel:
@@ -69,25 +71,49 @@ def _status(label: QLabel, text: str, role: str) -> None:
         refresh_style(label)
 
 
+class AdvancedSwitch(QPushButton):
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#365582" if self.isChecked() else "#252e3c"))
+        painter.drawRoundedRect(QRectF(0, 2, 27, 14), 7, 7)
+        painter.setBrush(QColor("#a4c5ff" if self.isChecked() else "#6d7c91"))
+        painter.drawEllipse(QRectF(15 if self.isChecked() else 2, 4, 10, 10))
+        painter.setPen(QColor("#7890b4"))
+        painter.setFont(self.font())
+        painter.drawText(self.rect().adjusted(35, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, self.text())
+
+
 class _HealthField(QFrame):
     def __init__(self, caption: str) -> None:
         super().__init__()
         self.setProperty("uiRole", "panel")
         self.setProperty("inspection", True)
+        self.setObjectName("healthField")
         self.setMinimumWidth(0)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(20, 18, 20, 18)
+        self.setMinimumHeight(124)
         layout.setSpacing(5)
-        self.caption = _label(caption, "micro")
+        self.caption = _label(caption, "healthCaption")
+        self.indicator = _label("", "healthCheck")
+        heading = QHBoxLayout()
+        heading.addWidget(self.caption, 1)
+        heading.addWidget(self.indicator)
         self.value = _label("Unavailable", "metricValue")
         self.hint = _label("Waiting for a runtime snapshot.", "small")
-        layout.addWidget(self.caption)
+        layout.addLayout(heading)
+        layout.addSpacing(10)
         layout.addWidget(self.value)
         layout.addWidget(self.hint)
         layout.addStretch(1)
 
     def update_value(self, value: str, hint: str, role: str = "info") -> None:
         _status(self.value, value, role)
+        _status(self.indicator, "✓" if role == "success" else "·", role)
+        if role == "success":
+            self.indicator.setPixmap(line_icon("check", "#57e5a2", 12).pixmap(12, 12))
         self.hint.setText(hint)
 
 
@@ -119,6 +145,7 @@ class DiagnosticsView(QWidget):
         layout.setSpacing(10)
 
         tabs_panel = _panel()
+        self.tabs_panel = tabs_panel
         tabs = QHBoxLayout(tabs_panel)
         tabs.setContentsMargins(6, 6, 6, 6)
         tabs.setSpacing(6)
@@ -138,7 +165,15 @@ class DiagnosticsView(QWidget):
         tabs.addStretch(1)
         self.global_status = _label("WAITING", "micro")
         tabs.addWidget(self.global_status)
-        layout.addWidget(tabs_panel)
+        # Keep the existing section buttons as adapters; the header switch is
+        # the visible navigation between status and technical tooling.
+        tabs_panel.hide()
+        self.advanced_toggle = AdvancedSwitch("Advanced view")
+        self.advanced_toggle.setFixedSize(150, 26)
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setProperty("buttonRole", "advancedSwitch")
+        self.advanced_toggle.clicked.connect(
+            lambda checked: self.set_section("advanced" if checked else "status"))
 
         self.stack = QStackedWidget()
         self.stack.setMinimumWidth(0)
@@ -150,17 +185,34 @@ class DiagnosticsView(QWidget):
         status_layout.setSpacing(10)
 
         self.hero = _panel()
-        hero_layout = QVBoxLayout(self.hero)
-        hero_layout.setContentsMargins(16, 13, 16, 13)
+        self.hero.setObjectName("diagnosticsHero")
+        self.hero.setMinimumHeight(126)
+        hero_layout = QHBoxLayout(self.hero)
+        hero_layout.setContentsMargins(25, 24, 25, 24)
         hero_layout.setSpacing(5)
-        self.hero_title = _label("Waiting for BizHawk", "pageTitle")
+        self.connection_icon = QLabel()
+        self.connection_icon.setObjectName("connectionHealthIcon")
+        self.connection_icon.setFixedSize(56, 56)
+        self.connection_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.connection_icon.setPixmap(line_icon("health", "#57e5a2", 24).pixmap(24, 24))
+        hero_layout.addWidget(self.connection_icon)
+        hero_layout.addSpacing(15)
+        hero_copy = QVBoxLayout()
+        hero_copy.setSpacing(6)
+        hero_copy.addWidget(_label("EMULATOR CONNECTION", "healthCaption"))
+        self.hero_title = _label("Waiting for BizHawk", "healthHeroTitle")
         self.hero_description = _label("Connect the emulator to inspect live system health.")
         self.last_update = _label("LAST RAM UPDATE  ·  Never", "small")
         self.domain = _label("RAM DOMAIN  ·  Unavailable", "micro")
-        hero_layout.addWidget(self.hero_title)
-        hero_layout.addWidget(self.hero_description)
-        hero_layout.addWidget(self.last_update)
-        hero_layout.addWidget(self.domain)
+        self.last_update.setParent(self.hero)
+        self.domain.setParent(self.hero)
+        hero_copy.addWidget(self.hero_title)
+        self.hero_description.setProperty("uiRole", "healthHint")
+        hero_copy.addWidget(self.hero_description)
+        hero_layout.addLayout(hero_copy, 1)
+        hero_layout.addWidget(self.global_status)
+        self.last_update.hide()
+        self.domain.hide()
         status_layout.addWidget(self.hero)
 
         self.health_grid = QGridLayout()
@@ -169,51 +221,73 @@ class DiagnosticsView(QWidget):
         self.fields = {
             key: _HealthField(caption)
             for key, caption in (
+                ("party", "Party stream"),
+                ("pc", "PC monitoring"),
+                ("layout", "Box layout"),
+                ("command", "Command channel"),
                 ("connection", "BIZHAWK CONNECTION"),
                 ("game", "CURRENT GAME"),
-                ("party", "PARTY STREAM"),
-                ("command", "COMMAND CHANNEL"),
-                ("pc", "PC MONITOR"),
-                ("layout", "BOX LAYOUT"),
                 ("acquisition", "NEW-CATCH MONITORING"),
                 ("boxed", "BOXED POKÉMON"),
             )
         }
+        for key in ("connection", "game", "acquisition", "boxed"):
+            self.fields[key].setParent(self.status_page)
+            self.fields[key].resize(0, 124)
+            self.fields[key].hide()
         status_layout.addLayout(self.health_grid)
 
         self.lower_layout = QBoxLayout(QBoxLayout.Direction.LeftToRight)
         self.lower_layout.setSpacing(10)
         self.party_panel = _panel()
+        self.party_panel.setObjectName("diagnosticParty")
         party_layout = QVBoxLayout(self.party_panel)
-        party_layout.setContentsMargins(12, 12, 12, 12)
-        heading = QHBoxLayout()
-        heading.addWidget(_label("PARTY SNAPSHOT", "sectionHeading"))
+        party_layout.setContentsMargins(0, 0, 0, 0)
+        party_layout.setSpacing(0)
+        snapshot_header = QFrame()
+        snapshot_header.setObjectName("diagnosticSnapshotHeader")
+        snapshot_header.setFixedHeight(62)
+        heading = QHBoxLayout(snapshot_header)
+        heading.setContentsMargins(20, 18, 20, 18)
+        party_heading = _label("PARTY SNAPSHOT", "runKicker")
+        party_heading.setWordWrap(False)
+        heading.addWidget(party_heading)
         heading.addStretch(1)
         self.party_state_label = _label("WAITING", "micro")
         heading.addWidget(self.party_state_label)
-        party_layout.addLayout(heading)
+        party_layout.addWidget(snapshot_header)
         self.party_empty = _label("No party snapshot received.", "emptyState")
         party_layout.addWidget(self.party_empty)
         self.party_rows = []
+        self.party_meta = []
+        self.party_grid = QGridLayout()
+        self.party_grid.setContentsMargins(12, 12, 12, 12)
+        self.party_grid.setSpacing(4)
+        party_layout.addLayout(self.party_grid)
         for index in range(6):
             row = QFrame()
             row.setProperty("uiRole", "raisedPanel")
             row.setMinimumWidth(0)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(7, 5, 7, 5)
+            row.setFixedHeight(60)
+            row_layout.setContentsMargins(10, 3, 10, 3)
             row_layout.setSpacing(7)
-            sprite = QLabel()
-            sprite.setFixedSize(32, 32)
-            sprite.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            identity = _label("", "pokemonMeta")
+            sprite = PokemonSprite(46, reference_art=True, reference_bounds=(42, 49))
+            identity = _label("", "healthPartyName")
             hp = _label("", "small")
+            hp.setParent(row)
+            copy = QVBoxLayout()
+            copy.setSpacing(3)
+            copy.addWidget(identity)
+            meta = _label("", "healthHint")
+            self.party_meta.append(meta)
+            copy.addWidget(meta)
             row_layout.addWidget(sprite)
-            row_layout.addWidget(identity, 1)
-            row_layout.addWidget(hp)
+            row_layout.addLayout(copy, 1)
+            hp.hide()
             row.hide()
-            party_layout.addWidget(row)
+            self.party_grid.addWidget(row, index // 2, index % 2)
             self.party_rows.append((row, sprite, identity, hp))
-        party_layout.addStretch(1)
 
         self.recovery_panel = _panel()
         recovery_layout = QVBoxLayout(self.recovery_panel)
@@ -248,6 +322,7 @@ class DiagnosticsView(QWidget):
         recovery_layout.addStretch(1)
         self.lower_layout.addWidget(self.party_panel, 6)
         self.lower_layout.addWidget(self.recovery_panel, 5)
+        self.lower_layout.addStretch(6)
         status_layout.addLayout(self.lower_layout)
         status_layout.addStretch(1)
 
@@ -280,6 +355,7 @@ class DiagnosticsView(QWidget):
         if section not in self.section_buttons:
             raise ValueError(f"Unknown diagnostics section: {section}")
         self.section_buttons[section].setChecked(True)
+        self.advanced_toggle.setChecked(section == "advanced")
         self.stack.setCurrentIndex(0 if section == "status" else 1)
 
     def resizeEvent(self, event) -> None:
@@ -291,7 +367,10 @@ class DiagnosticsView(QWidget):
         if columns != self._columns:
             for field in self.fields.values():
                 self.health_grid.removeWidget(field)
-            for index, field in enumerate(self.fields.values()):
+            for index, (key, field) in enumerate(self.fields.items()):
+                if key not in {"party", "pc", "layout", "command"}:
+                    field.hide()
+                    continue
                 self.health_grid.addWidget(field, index // columns, index % columns)
             for column in range(4):
                 self.health_grid.setColumnStretch(column, int(column < columns))
@@ -300,6 +379,8 @@ class DiagnosticsView(QWidget):
             QBoxLayout.Direction.LeftToRight if width >= 850
             else QBoxLayout.Direction.TopToBottom
         )
+        for index, (row, *_) in enumerate(self.party_rows):
+            self.party_grid.addWidget(row, index // (2 if width >= 600 else 1), index % (2 if width >= 600 else 1))
 
     def refresh(self, snapshot, presentation: Mapping | None = None) -> None:
         presentation = presentation or {}
@@ -357,8 +438,10 @@ class DiagnosticsView(QWidget):
         boxed = _without_prefix(presentation.get("boxed_count"), "Boxed Pokemon:", "—")
         acquisition = _without_prefix(presentation.get("acquisition_status"), "Monitoring new catches:")
         pc_event = _without_prefix(presentation.get("pc_event"), "Last PC event:", "")
-        self.fields["pc"].update_value(pc_status, "Current PC resolver and monitor state.")
-        self.fields["layout"].update_value(pc_layout, "Validated layout for the current emulator session.")
+        pc_ready = pc_status.casefold() == "monitoring"
+        layout_ready = pc_layout.casefold() == "resolved"
+        self.fields["pc"].update_value(pc_status, "Current PC resolver and monitor state.", "success" if pc_ready else "warning")
+        self.fields["layout"].update_value(pc_layout, "Validated layout for the current emulator session." if layout_ready else "Awaiting validation in this session.", "success" if layout_ready else "warning")
         self.fields["acquisition"].update_value(acquisition, "PC acquisition monitoring reported by the runtime.")
         self.fields["boxed"].update_value(boxed, pc_event or "Waiting for a validated PC snapshot.")
 
@@ -385,12 +468,20 @@ class DiagnosticsView(QWidget):
         else:
             # Do not claim command/PC health from a fresh party stream alone.
             title, description, state, role = (
-                "Live party connection is current",
-                "Review command and PC monitoring status below.", "LIVE RAM", "success",
+                "Connected · party current",
+                f"BizHawk · {game}. Review command and PC health below.", "LIVE RAM", "success",
             )
+            if command_ready and pc_ready and layout_ready:
+                title = "Connected & healthy"
+                description = f"BizHawk · {game} · Party and PC monitoring current."
         self.hero_title.setText(title)
         self.hero_description.setText(description)
+        self.hero.setToolTip(f"{self.last_update.text()}\n{self.domain.text()}")
         _status(self.global_status, state, role)
+        if self.connection_icon.property("statusRole") != role:
+            self.connection_icon.setProperty("statusRole", role)
+            self.connection_icon.setPixmap(line_icon("health", "#57e5a2" if role == "success" else "#ffcb69", 24).pixmap(24, 24))
+            refresh_style(self.connection_icon)
         self._refresh_party(members, fresh, valid)
         self.rediscover_button.setEnabled(bool(presentation.get("rediscover_enabled", connected)))
         recovery_message = str(presentation.get("recovery_message") or "")
@@ -412,6 +503,10 @@ class DiagnosticsView(QWidget):
             self._record_event(recovery_message)
             self._last_recovery = recovery_message
         self._render_events()
+        # Normal health remains sparse; actionable recovery and real events
+        # are still surfaced without requiring the advanced preference.
+        useful_events = [event for event in self._events if event.lower() not in {"no pc events yet.", "no pc events yet"}]
+        self.recovery_panel.setVisible(bool(recovery_message or recovering or useful_events))
 
     def _refresh_party(self, members: tuple, fresh: bool, valid: bool) -> None:
         _status(self.party_state_label, "LIVE" if fresh and valid else "LAST SNAPSHOT" if members else "WAITING",
@@ -424,18 +519,20 @@ class DiagnosticsView(QWidget):
             if mon is None:
                 continue
             species_id = getattr(mon, "species_id", 0)
-            if sprite.property("speciesId") != species_id:
-                sprite.setPixmap(get_static_sprite(species_id, 30))
-                sprite.setProperty("speciesId", species_id)
+            sprite.set_species(species_id)
             species = getattr(mon, "species", "Unknown species")
             nickname = getattr(mon, "nickname", "")
-            identity.setText(f"{nickname}\n{species}" if nickname and nickname.casefold() != species.casefold() else species)
+            identity.setText(nickname or species)
             stable_id = str(getattr(mon, "stable_id", "") or "Identity unavailable")
             identity.setToolTip(stable_id)
             checksum_valid = getattr(mon, "checksum_valid", False)
             current, maximum = getattr(mon, "current_hp", None), getattr(mon, "max_hp", None)
             hp.setText(f"HP {current} / {maximum}" if checksum_valid and current is not None and maximum is not None else "HP —")
             hp.setToolTip("Last received snapshot" if not fresh else "")
+            self.party_meta[index].setText(
+                f"Slot {index + 1} · {current}/{maximum} HP"
+                if checksum_valid and current is not None and maximum is not None
+                else f"Slot {index + 1} · HP unavailable")
 
     def _record_event(self, text: str) -> None:
         text = text.strip()

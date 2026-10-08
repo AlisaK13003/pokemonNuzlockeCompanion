@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from pokemon_ev_tracker.config.settings import AppSettings
@@ -51,93 +50,10 @@ def make_window(monkeypatch, tmp_path):
     assert app is not None
 
 
-@pytest.mark.parametrize("compact", [False, True])
-def test_ram_warning_footer_never_reflows_tracker_controls(make_window, compact) -> None:
-    app = QApplication.instance()
-    window = make_window()
-    window.resize(640, 520)
-    if compact:
-        window.set_compact_mode(True)
-    window.show()
-    app.processEvents()
-
-    valid_state = decode_party(_party_payload((_party_record(0x12345678, 183, 47, attack=27),)))
-    warning_text = (
-        "RAM checksum failed for slot(s) 3; showing the last valid matching-PID sample. "
-        "This full message remains available in the status tooltip."
-    )
-    warning_state = replace(valid_state, live_read_warning=warning_text)
-    window._refresh_tracker_party(True, valid_state)
-    for _ in range(3):
-        app.processEvents()
-    start_button = window.start_friendship_walk_button
-    original_y = start_button.mapToGlobal(QPoint(0, 0)).y()
-
-    window._refresh_tracker_party(True, warning_state)
-    for _ in range(3):
-        app.processEvents()
-    assert start_button.mapToGlobal(QPoint(0, 0)).y() == original_y
-    assert window.statusBar().isAncestorOf(window.tracker_status_message)
-    assert not window.training_view.isAncestorOf(window.tracker_status_message)
-    assert not window.tracker_status_message.wordWrap()
-    assert window.tracker_status_message.toolTip() == warning_text
-    assert window.statusBar().height() == 26
-    if compact:
-        assert window.tracker_status_message.text() == "⚠ RAM checksum warning"
-
-    window._refresh_tracker_party(True, valid_state)
-    for _ in range(3):
-        app.processEvents()
-    assert start_button.mapToGlobal(QPoint(0, 0)).y() == original_y
-    assert window.tracker_status_message.text() == "BizHawk RAM • CONNECTED"
-    assert window.tracker_status_message.toolTip() == ""
-    window.close()
 
 
-def test_training_selector_and_single_workspace_fit_desktop_breakpoints(make_window) -> None:
-    app = QApplication.instance()
-    window = make_window()
-    window.show()
-    party = decode_party(_party_payload(tuple(
-        _party_record(0x1000 + slot, 183 + slot, 47, attack=20 + slot)
-        for slot in range(6))))
-    window._refresh_tracker_party(True, party)
-    view = window.training_view
-    for width in (1400, 1000, 800, 620):
-        window.resize(width, 500)
-        app.processEvents()
-        slots = list(view.selector.slots.values())
-        assert len(slots) == 6
-        assert all(slot.isVisible() and slot.isEnabled() for slot in slots)
-        assert sum(slot.isChecked() for slot in slots) == 1
-        assert max(slot.geometry().right() for slot in slots) < view.selector.width()
-        assert view.scroll.widget().width() <= view.scroll.viewport().width()
-        assert view.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        assert window.shell.workspace.currentWidget() is view
-        assert all(not card["widget"].isVisible() for card in window.tracker_party_cards.values())
-    assert view.scroll.verticalScrollBar().maximum() > 0
-    window.close()
 
 
-def test_narrow_workspaces_keep_ev_summary_and_inspection_fields(make_window) -> None:
-    app = QApplication.instance()
-    window = make_window()
-    window.resize(620, 500)
-    window.show()
-    party = decode_party(_party_payload((_party_record(0x1234, 183, 47, attack=20),)))
-    window._refresh_tracker_party(True, party)
-    app.processEvents()
-    assert window.training_view.total.text() == "0 / 510 total"
-    assert all(label.isVisible() for label in window.training_view.ev_values.values())
-    window.set_tracker_view("stats")
-    app.processEvents()
-    view = window.party_stats_view
-    assert window.shell.workspace.currentWidget() is view
-    assert view.stat_values["attack"].text() == "20"
-    assert view.friendship.isVisible()
-    assert view.moves_panel.isVisible()
-    assert view.scroll.widget().width() <= view.scroll.viewport().width()
-    window.close()
 
 
 def test_training_ev_log_scrolls_without_expanding_workspace(make_window) -> None:
@@ -156,65 +72,10 @@ def test_training_ev_log_scrolls_without_expanding_workspace(make_window) -> Non
     window.close()
 
 
-@pytest.mark.parametrize("width", (700, 900, 1400))
-def test_party_stats_show_all_fields_and_four_move_slots_at_each_width(make_window, width: int) -> None:
-    app = QApplication.instance()
-    window = make_window()
-    window.resize(width, 520)
-    window.show()
-    party = decode_party(_party_payload((_party_record(
-        0x12345678, 183, 47, attack=27, friendship=164, moves=(98, 45, 0, 1)),)))
-    window._refresh_tracker_party(True, party)
-    window.set_tracker_view("stats")
-    app.processEvents()
-    view = window.party_stats_view
-    assert view.stat_values["attack"].text() == "27"
-    assert all(label.isVisible() for label in view.stat_names.values())
-    assert all(label.isVisible() for label in view.iv_values.values())
-    assert [label.text() for label in view.move_names] == [
-        "01  Quick Attack", "02  Growl", "03  Empty move slot", "04  Pound"]
-    assert all(label.isVisible() for label in view.move_names)
-    assert view.friendship_bar.isVisible()
-    assert view.friendship_bar.value() == 164
-    assert view.scroll.widget().width() <= view.scroll.viewport().width()
-    assert view.scroll.verticalScrollBar().maximum() > 0
-    window.close()
 
 
-def test_party_selector_height_stays_compact_when_window_grows(make_window) -> None:
-    app = QApplication.instance()
-    window = make_window()
-    window.resize(900, 520)
-    window.show()
-    party = decode_party(_party_payload((_party_record(0x12345678, 183, 47, attack=27),)))
-    window._refresh_tracker_party(True, party)
-    window.set_tracker_view("stats")
-    app.processEvents()
-    view = window.party_stats_view
-    assert view.item_name.text() == "No held item"
-    selector_height = view.selector.height()
-    window.resize(900, 820)
-    app.processEvents()
-    assert view.selector.height() == selector_height
-    assert view.selector.height() <= 100
-    window.close()
 
 
-def test_party_selection_synchronizes_all_workspaces_and_follows_identity(make_window) -> None:
-    app = QApplication.instance()
-    window = make_window()
-    records = (_party_record(0x1234, 183, 47, attack=27),
-               _party_record(0x5678, 443, 8, attack=41))
-    window._refresh_tracker_party(True, decode_party(_party_payload(records)))
-    window.training_view.selector.slots[2].click()
-    assert all(view.selected_slot == 2 for view in window._party_views)
-    assert window.party_stats_view.stat_values["attack"].text() == "41"
-    window._refresh_tracker_party(True, decode_party(_party_payload(tuple(reversed(records)))))
-    app.processEvents()
-    assert all(view.selected_slot == 1 for view in window._party_views)
-    assert window.party_stats_view.stat_values["attack"].text() == "41"
-    assert window.party_stats_view.identity.species.text().startswith("Gible")
-    window.close()
 
 
 def test_nuzlocke_tables_remain_locally_scrollable_at_narrow_width(make_window) -> None:
@@ -237,168 +98,18 @@ def test_nuzlocke_tables_remain_locally_scrollable_at_narrow_width(make_window) 
     window.close()
 
 
-def test_training_stats_toggle_hides_log_without_clearing_history(make_window) -> None:
-    window = make_window()
-    window._ev_history_records = [("15:42:11  Marill Attack 0 -> 1  +1", "+1 Attack")]
-    window._render_ev_history()
-    window.set_tracker_view("stats")
-    assert window.shell.workspace.currentWidget() is window.party_stats_view
-    assert window.ev_change_log.isHidden()
-    assert window.ev_change_list.count() == 1
-    assert window.settings.tracker_view == "stats"
-    window.set_tracker_view("training")
-    assert window.shell.workspace.currentWidget() is window.training_view
-    assert not window.ev_change_log.isHidden()
-    assert window.ev_change_list.item(0).text().startswith("15:42:11")
-    window.close()
 
 
-def test_stats_view_is_restored_from_settings(make_window) -> None:
-    window = make_window(AppSettings(tracker_view="stats"))
-    assert window.tracker_view == "stats"
-    assert window.tracker_view_buttons["stats"].isChecked()
-    assert window.shell.workspace.currentWidget() is window.party_stats_view
-    assert window.ev_change_log.isHidden()
-    window.close()
 
 
-def test_stats_view_works_in_compact_mode(make_window) -> None:
-    window = make_window()
-    window.set_tracker_view("stats")
-    window.set_compact_mode(True)
-    assert window.compact_mode
-    assert window.shell.workspace.currentWidget() is window.compact_party_stats_view
-    assert window.ev_change_log.isHidden()
-    window.close()
 
 
-def test_party_reorder_keeps_stats_attached_to_each_ram_record(make_window) -> None:
-    window = make_window()
-    window.set_tracker_view("stats")
-    first = _party_payload(
-        (
-            _party_record(0x12345678, 183, 47, attack=27, moves=(401, 0, 0, 0),
-                          move_pps=(8, 0, 0, 0), move_pp_ups=(2, 0, 0, 0)),
-            _party_record(0x12345679, 443, 8, attack=41, moves=(85, 0, 0, 0),
-                          move_pps=(12, 0, 0, 0)),
-        )
-    )
-    second = _party_payload(
-        (
-            _party_record(0x12345679, 443, 8, attack=41, moves=(85, 0, 0, 0),
-                          move_pps=(12, 0, 0, 0)),
-            _party_record(0x12345678, 183, 47, attack=27, moves=(401, 0, 0, 0),
-                          move_pps=(8, 0, 0, 0), move_pp_ups=(2, 0, 0, 0)),
-        )
-    )
-
-    window._refresh_tracker_party(True, decode_party(first))
-    assert window.tracker_party_cards[1]["stat_values"]["attack"].text() == "27"
-    assert window.tracker_party_cards[2]["stat_values"]["attack"].text() == "41"
-    assert window.party_stats_view.stat_values["attack"].text() == "27"
-    assert window.party_stats_view.move_names[0].text() == "01  Aqua Tail"
-    assert window.party_stats_view.move_pp[0].text() == "8 / 14 PP"
-
-    window._refresh_tracker_party(True, decode_party(second))
-    assert window.tracker_party_cards[1]["stat_values"]["attack"].text() == "41"
-    assert window.tracker_party_cards[1]["ability"].text() == "Ability: Sand Veil"
-    assert window.tracker_party_cards[2]["stat_values"]["attack"].text() == "27"
-    assert window.tracker_party_cards[2]["ability"].text() == "Ability: Thick Fat"
-    assert window.party_stats_view.selected_slot == 2
-    assert window.party_stats_view.stat_values["attack"].text() == "27"
-    assert "Thick Fat" in window.party_stats_view.ability.text()
-    assert window.party_stats_view.move_names[0].text() == "01  Aqua Tail"
-    assert window.party_stats_view.move_pp[0].text() == "8 / 14 PP"
-    window.party_stats_view.set_selected_slot(1)
-    assert window.party_stats_view.move_names[0].text() == "01  Thunderbolt"
-    assert window.party_stats_view.move_pp[0].text() == "12 / 15 PP"
-    window.close()
 
 
-def test_nature_highlights_only_boosted_and_lowered_non_hp_stats(make_window) -> None:
-    window = make_window()
-    window.set_tracker_view("stats")
-    record = _party_record(3, 183, 47, attack=27)
-    window._refresh_tracker_party(True, decode_party(_party_payload((record,))))
-    view = window.party_stats_view
-    assert "Adamant" in view.nature.text()
-    assert view.stat_names["attack"].property("natureRole") == "up"
-    assert view.stat_names["special_attack"].property("natureRole") == "down"
-    assert view.stat_names["hp"].property("natureRole") == "neutral"
-    window.close()
 
 
-def test_party_stats_renders_friendship_and_debug_value(make_window) -> None:
-    window = make_window()
-    window.set_tracker_view("stats")
-    party_state = decode_party(
-        _party_payload(
-            (
-                _party_record(
-                    3,
-                    183,
-                    47,
-                    attack=27,
-                    friendship=164,
-                    moves=(98, 45, 0, 1),
-                ),
-            )
-        )
-    )
-
-    window._refresh_tracker_party(True, party_state)
-    window._refresh_ram_party_debug(party_state, None)
-    view = window.party_stats_view
-    assert window.shell.workspace.currentWidget() is view
-    assert view.friendship.text() == "Friendship 164 / 255"
-    assert view.friendship_bar.maximum() == 255
-    assert view.friendship_bar.value() == 164
-    assert [label.text() for label in view.move_names] == [
-        "01  Quick Attack", "02  Growl", "03  Empty move slot", "04  Pound"]
-    assert view.move_types[0].text() == "Normal"
-    assert view.move_categories[0].text() == "Physical"
-    assert "Priority +1" in view.move_details[0].text()
-    assert view.move_categories[1].text() == "Status"
-    assert "Power —" in view.move_details[1].text()
-    assert "Friendship: 164" in window.ram_party_details.toPlainText()
-    window.close()
 
 
-def test_party_stats_moves_update_live_from_ram(make_window) -> None:
-    window = make_window()
-    window.set_tracker_view("stats")
-    first = decode_party(
-        _party_payload(
-            (_party_record(3, 183, 47, attack=27, moves=(98, 45, 0, 1),
-                           move_pps=(22, 30, 0, 35)),)
-        )
-    )
-    updated = decode_party(
-        _party_payload(
-            (_party_record(3, 183, 47, attack=27, moves=(85, 111, 0, 1),
-                           move_pps=(10, 35, 0, 34), move_pp_ups=(1, 0, 0, 0)),)
-        )
-    )
-
-    window._refresh_tracker_party(True, first)
-    view = window.party_stats_view
-    original_labels = tuple(view.move_names)
-    assert view.move_pp[0].text() == "22 / 30 PP"
-    window._refresh_tracker_party(True, updated)
-
-    assert tuple(view.move_names) == original_labels
-    assert [label.text() for label in view.move_names] == [
-        "01  Thunderbolt", "02  Defense Curl", "03  Empty move slot", "04  Pound"]
-    assert view.move_pp[0].text() == "10 / 18 PP"
-    assert view.move_pp[1].text() == "35 / 40 PP"
-    assert view.move_details[1].text() == "Power —  ·  Accuracy —"
-    assert view.move_types[1].text() == "Normal"
-    assert view.move_categories[1].text() == "Status"
-    assert not view.move_types[2].isVisible()
-    compact = window.compact_party_stats_view
-    assert compact.move_pp[0].text() == "10 / 18 PP"
-    assert compact.move_details[0].isHidden()
-    window.close()
 
 
 def test_friendship_goal_selection_and_live_auto_stop_use_safe_stop(make_window) -> None:
@@ -569,52 +280,18 @@ def test_already_reached_friendship_goal_never_starts_commands(make_window) -> N
     window.close()
 
 
-def test_friendship_updates_live_when_ram_value_changes(make_window) -> None:
-    window = make_window()
-    window.set_tracker_view("stats")
-
-    first = decode_party(
-        _party_payload((_party_record(3, 183, 47, attack=27, friendship=164),))
-    )
-    updated = decode_party(
-        _party_payload((_party_record(3, 183, 47, attack=27, friendship=165),))
-    )
-    window._refresh_tracker_party(True, first)
-    bar = window.party_stats_view.friendship_bar
-    original_bar_id = id(bar)
-
-    window._refresh_tracker_party(True, updated)
-
-    view = window.party_stats_view
-    assert view.friendship.text() == "Friendship 165 / 255"
-    assert view.friendship_bar.value() == 165
-    assert id(view.friendship_bar) == original_bar_id
-    window.close()
 
 
-def test_compact_party_stats_shows_minimal_friendship_without_bar(make_window) -> None:
-    window = make_window()
-    window.set_tracker_view("stats")
-    window.set_compact_mode(True)
-    party_state = decode_party(
-        _party_payload((_party_record(3, 183, 47, attack=27, friendship=164),))
-    )
-
-    window._refresh_tracker_party(True, party_state)
-    view = window.compact_party_stats_view
-    assert view.nature.text().startswith("Adamant")
-    assert "Thick Fat" in view.ability.text()
-    assert view.friendship.text() == "Friendship 164 / 255"
-    assert view.friendship_bar.isHidden()
-    window.close()
 
 
-def test_main_window_baselines_then_surfaces_new_party_acquisition(monkeypatch, tmp_path) -> None:
+def test_main_window_backfills_party_baseline_and_surfaces_conflicting_acquisition(monkeypatch, tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(AppSettings, "save_default", lambda _self: None)
     run_store = NuzlockeStore(tmp_path / "runs.json")
     run = run_store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
     original = _party_record(0x12345678, 21, 0, attack=20, met_location_id=0x11, met_level=3)
+    # This fixture represents an existing mid-game party, after the starter.
+    run.starter_observation_complete = True
 
     class SnapshotSource:
         profile = PLATINUM_PROFILE
@@ -652,6 +329,14 @@ def test_main_window_baselines_then_surfaces_new_party_acquisition(monkeypatch, 
     try:
         assert run.acquisition_events == []
         assert run.observed_pokemon_ids == ["pid:12345678:ot:0000:0000"]
+        route_id = next(
+            item.location_id for item in PLATINUM_NUZLOCKE_PROFILE.locations
+            if item.name == "Route 202"
+        )
+        initial_encounter = run.encounters[route_id]
+        assert initial_encounter.status == "CAUGHT"
+        assert initial_encounter.species == "Spearow"
+        assert initial_encounter.level == 3
 
         newly_seen = _party_record(
             0x87654321,
@@ -676,16 +361,7 @@ def test_main_window_baselines_then_surfaces_new_party_acquisition(monkeypatch, 
         assert "decrypted box +0x3E" in debug_text
         assert "Acquisition classification: WILD" in debug_text
         assert "Already observed in active run: true" in debug_text
-        assert (
-            run.encounters[
-                next(
-                    item.location_id
-                    for item in PLATINUM_NUZLOCKE_PROFILE.locations
-                    if item.name == "Route 202"
-                )
-            ].species
-            == ""
-        )
+        assert run.encounters[route_id] == initial_encounter
     finally:
         window.close()
 

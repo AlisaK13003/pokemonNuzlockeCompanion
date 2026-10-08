@@ -6,6 +6,7 @@ from pokemon_ev_tracker.core.nuzlocke.acquisition import (
     AcquisitionCandidate,
     PartyAcquisitionObserver,
     pending_acquisition_events,
+    reconcile_party_encounters,
 )
 from pokemon_ev_tracker.core.nuzlocke.models import PokemonAcquisitionEvent
 from pokemon_ev_tracker.core.nuzlocke.storage import NuzlockeStore
@@ -84,6 +85,105 @@ def _location_id(name: str) -> str:
         for location in PLATINUM_NUZLOCKE_PROFILE.locations
         if location.name == name
     )
+
+
+def test_party_reconciliation_backfills_baselined_route_201_with_met_level(tmp_path):
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    candidate = _candidate("amethyst", species_id=41, species_name="Zubat",
+                           nickname="amethyst", met_level=4, level=10)
+    store.mark_pokemon_observed(run.run_id, [candidate.stable_id])
+    result = reconcile_party_encounters(
+        (candidate,), connected=True, valid_snapshot=True, run=run,
+        store=store, classify=classify_platinum_acquisition,
+    )
+    assert len(result) == 1
+    row = run.encounters[_location_id("Route 201")]
+    assert (row.status, row.nickname, row.species, row.level) == (
+        "CAUGHT", "amethyst", "Zubat", 4,
+    )
+    assert row.stable_id == candidate.stable_id
+    assert NuzlockeStore(store.path).active_run.encounters[row.location_id] == row
+    assert reconcile_party_encounters(
+        (candidate,), connected=True, valid_snapshot=True, run=run,
+        store=store, classify=classify_platinum_acquisition,
+    ) == ()
+    assert not run.acquisition_events
+
+
+def test_party_reconciliation_preserves_conflicts_and_rejects_invalid_reads(tmp_path):
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    candidate = _candidate("one", met_location_id=0x11)
+    route_id = _location_id("Route 202")
+    original = run.encounters[route_id]
+    for connected, valid in ((False, True), (True, False)):
+        assert reconcile_party_encounters(
+            (candidate,), connected=connected, valid_snapshot=valid, run=run,
+            store=store, classify=classify_platinum_acquisition,
+        ) == ()
+    assert reconcile_party_encounters(
+        (candidate, replace(candidate, stable_id="two")),
+        connected=True, valid_snapshot=True, run=run,
+        store=store, classify=classify_platinum_acquisition,
+    ) == ()
+    for status in ("CAUGHT", "FAILED", "DEAD"):
+        recorded = replace(original, status=status, notes="Manual history")
+        store.update_encounter(run.run_id, recorded)
+        assert reconcile_party_encounters(
+            (candidate,), connected=True, valid_snapshot=True, run=run,
+            store=store, classify=classify_platinum_acquisition,
+        ) == ()
+        assert run.encounters[route_id] == recorded
+
+
+def test_party_reconciliation_resolves_pending_event_and_rolls_back_failed_save(tmp_path, monkeypatch):
+    import pytest
+
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    candidate = _candidate("caught", met_location_id=0x11)
+    route_id = _location_id("Route 202")
+    store.record_acquisition_event(run.run_id, _event(candidate, route_id))
+    original = run.encounters[route_id]
+    save = store.save
+    monkeypatch.setattr(store, "save", lambda: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        reconcile_party_encounters(
+            (candidate,), connected=True, valid_snapshot=True, run=run,
+            store=store, classify=classify_platinum_acquisition,
+        )
+    assert run.encounters[route_id] == original
+    assert not run.resolved_acquisition_ids
+    monkeypatch.setattr(store, "save", save)
+    reconcile_party_encounters(
+        (candidate,), connected=True, valid_snapshot=True, run=run,
+        store=store, classify=classify_platinum_acquisition,
+    )
+    assert pending_acquisition_events(run) == ()
+
+
+def test_party_reconciliation_excludes_non_wild_metadata_and_keeps_notes(tmp_path):
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Platinum", PLATINUM_NUZLOCKE_PROFILE)
+    candidate = _candidate("caught", met_location_id=0x11)
+    for changes in (
+        {"is_egg": True}, {"egg_location_id": 1}, {"origin_game": 7},
+        {"met_location_id": 0xFFFF}, {"met_level": None},
+        {"source_location": "BOX"}, {"met_location_id": 0x33},
+        {"species_id": 387, "met_location_id": 0x10, "met_level": 5},
+    ):
+        assert reconcile_party_encounters(
+            (replace(candidate, **changes),), connected=True, valid_snapshot=True,
+            run=run, store=store, classify=classify_platinum_acquisition,
+        ) == ()
+    route_id = _location_id("Route 202")
+    store.update_encounter(run.run_id, replace(run.encounters[route_id], notes="Remember this"))
+    reconcile_party_encounters(
+        (candidate,), connected=True, valid_snapshot=True, run=run,
+        store=store, classify=classify_platinum_acquisition,
+    )
+    assert run.encounters[route_id].notes == "Remember this"
 
 
 def test_pk4_location_mapping_uses_platinum_names_and_normalized_rows() -> None:
@@ -312,6 +412,71 @@ def test_invalid_connected_snapshot_does_not_baseline_away_a_later_valid_party_c
         classify=classify_platinum_acquisition,
     )
     assert len(events) == 1 and events[0].stable_id == arrived.stable_id
+
+
+def test_invalid_snapshot_logging_is_throttled_without_changing_detection(tmp_path, caplog, monkeypatch):
+    import logging
+    clock = [100.0]
+    monkeypatch.setattr("pokemon_ev_tracker.core.nuzlocke.acquisition.time.monotonic", lambda: clock[0])
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Logging", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver()
+    candidates = (_candidate("pid:one"), _candidate("pid:two"))
+    caplog.set_level(logging.INFO, logger="pokemon_ev_tracker.core.nuzlocke.acquisition")
+    for tick in range(20):
+        clock[0] = 100 + tick
+        assert observer.observe(candidates, connected=True, valid_snapshot=False, run=run,
+                                store=store, classify=classify_platinum_acquisition) == ()
+    assert sum("invalid RAM snapshot" in r.message for r in caplog.records) == 1
+    assert not any("Acquisition candidate" in r.message for r in caplog.records)
+    assert observer.last_decision["status"] == "suppressed"
+    assert not run.acquisition_events
+    assert not run.observed_pokemon_ids
+    clock[0] = 140
+    observer.observe(candidates, connected=True, valid_snapshot=False, run=run,
+                     store=store, classify=classify_platinum_acquisition)
+    assert sum("invalid RAM snapshot" in r.message for r in caplog.records) == 2
+    observer.observe(candidates, connected=True, valid_snapshot=True, run=run,
+                     store=store, classify=classify_platinum_acquisition)
+    assert any("monitoring resumed" in r.message for r in caplog.records)
+    assert all(store.has_observed_pokemon(run.run_id, c.stable_id) for c in candidates)
+
+
+def test_brief_invalid_reads_stay_silent_and_each_recovery_resets_delay(tmp_path, caplog, monkeypatch):
+    import logging
+    clock = [0.0]
+    monkeypatch.setattr("pokemon_ev_tracker.core.nuzlocke.acquisition.time.monotonic", lambda: clock[0])
+    store = NuzlockeStore(tmp_path / "runs.json")
+    run = store.create_run("Brief drops", PLATINUM_NUZLOCKE_PROFILE)
+    observer = PartyAcquisitionObserver()
+    candidates = (_candidate("pid:one"),)
+    caplog.set_level(logging.INFO, logger="pokemon_ev_tracker.core.nuzlocke.acquisition")
+    def observe(valid, connected=True):
+        return observer.observe(candidates, connected=connected, valid_snapshot=valid,
+                                run=run, store=store, classify=classify_platinum_acquisition)
+    observe(True)
+    for start in (1.0, 12.0, 23.0):
+        for elapsed in (0.0, 5.0, 9.99):
+            clock[0] = start + elapsed
+            assert observe(False) == ()
+        observe(True)
+    assert not caplog.records
+    clock[0] = 40.0
+    observe(False)
+    clock[0] = 45.0
+    observe(False, connected=False)
+    clock[0] = 50.0
+    observe(False)
+    assert not caplog.records
+    clock[0] = 60.0
+    observe(False)
+    assert sum("invalid RAM snapshot" in r.message for r in caplog.records) == 1
+    observe(True)
+    assert sum("monitoring resumed" in r.message for r in caplog.records) == 1
+    clock[0] = 61.0
+    observe(False)
+    observe(True)
+    assert sum("monitoring resumed" in r.message for r in caplog.records) == 1
 
 
 def test_acquisition_history_is_per_run_and_baselined_on_run_switch(tmp_path) -> None:

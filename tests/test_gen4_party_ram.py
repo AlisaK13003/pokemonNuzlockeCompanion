@@ -52,6 +52,62 @@ def test_shuffle_permutation_selection() -> None:
     assert block_order(0x00002000) == "ABDC"
 
 
+@pytest.mark.parametrize("shuffle", range(24))
+@pytest.mark.parametrize("plain_tail", (False, True))
+def test_live_party_accepts_checksummed_decrypted_ram_without_context_flags(shuffle, plain_tail):
+    pid = 0xE5D00000 | (shuffle << 13)
+    original = _party_record(pid=pid, species_id=363, evs=(1, 2, 3, 4, 5, 6), nickname="ruby")
+    expected = decode_party_pokemon(original)
+    record = bytearray(original)
+    checksum = int.from_bytes(record[6:8], "little")
+    record[8:136] = xor_words(record[8:136], checksum)
+    if plain_tail:
+        record[136:156] = xor_words(record[136:156], pid)
+    # GetValue does not set the context flag while accessing fields.
+    assert record[4:6] == b"\x00\x00"
+    assert not decode_party_pokemon(record).diagnostics.checksum_valid
+    party = decode_party((1).to_bytes(4, "little") + record + bytes(236 * 5))
+    mon = party.pokemon[0]
+    assert mon.checksum_valid
+    assert mon.species_id == expected.species_id
+    assert mon.nickname == "ruby"
+    assert mon.stable_id == expected.stable_id
+    assert mon.decoded.evs == expected.evs
+    assert mon.decoded.current_stats == expected.current_stats
+    assert mon.current_hp == expected.current_hp
+    assert mon.decoded.diagnostics.box_data_state == "decrypted"
+    assert mon.decoded.diagnostics.battle_data_state == ("decrypted" if plain_tail else "encrypted")
+
+
+@pytest.mark.parametrize("kind", ("partial", "corrupt_plain", "corrupt_encrypted"))
+def test_live_party_still_rejects_partial_and_corrupted_ram(kind):
+    record = bytearray(_party_record(pid=0xE5D2DF40, species_id=363, evs=(1, 2, 3, 4, 5, 6)))
+    plain = xor_words(record[8:136], int.from_bytes(record[6:8], "little"))
+    if kind == "partial":
+        record[8:40] = plain[:32]
+    elif kind == "corrupt_plain":
+        record[8:136] = plain
+        record[48] ^= 1
+    else:
+        record[48] ^= 1
+    mon = decode_party_pokemon(record, allow_decrypted_ram=True)
+    assert not mon.diagnostics.checksum_valid
+
+
+@pytest.mark.parametrize("shuffle", range(24))
+def test_live_party_accepts_plain_stats_while_box_blocks_are_still_encrypted(shuffle):
+    pid = 0xE5D00000 | (shuffle << 13)
+    record = bytearray(_party_record(pid=pid, species_id=363, evs=(1, 2, 3, 4, 5, 6), current_hp=0, max_hp=31))
+    record[136:156] = xor_words(record[136:156], pid)
+    mon = decode_party_pokemon(record, allow_decrypted_ram=True)
+    assert mon.diagnostics.checksum_valid
+    assert mon.diagnostics.battle_stats_valid
+    assert mon.current_hp == 0
+    assert mon.max_hp == 31
+    assert mon.diagnostics.box_data_state == "encrypted"
+    assert mon.diagnostics.battle_data_state == "decrypted"
+
+
 def test_block_unshuffle_restores_original_order() -> None:
     original = b"A" * 32 + b"B" * 32 + b"C" * 32 + b"D" * 32
     shuffled = b"A" * 32 + b"C" * 32 + b"D" * 32 + b"B" * 32
@@ -508,6 +564,7 @@ def test_bizhawk_data_source_prefers_scanned_checksum_valid_party_candidate() ->
     assert party is not None
     assert party.party_count == 2
     assert party.candidate_count == 1
+    assert party.error is None
     assert [pokemon.species for pokemon in party.pokemon] == ["Slakoth", "Spearow"]
     assert all(pokemon.checksum_valid for pokemon in party.pokemon)
 

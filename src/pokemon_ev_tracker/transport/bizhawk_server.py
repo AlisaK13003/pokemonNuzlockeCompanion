@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from pokemon_ev_tracker.core.pc_discovery_status import pc_discovery_failure_message
 from pokemon_ev_tracker.games.platinum.pc_discovery import (
     INSPECTION_AFTER_BYTES,
     INSPECTION_BEFORE_BYTES,
@@ -135,6 +136,7 @@ class BizHawkDebugServer:
         self._pc_sram_search_baselines: dict[tuple[str, str, int, str], dict[str, Any]] = {}
         self._pc_sram_search_status: dict[str, Any] = {"status": "idle"}
         self._pc_discovery_scan: PCStorageDiscoveryAccumulator | None = None
+        self._inactive_pc_discovery_notices: dict[str, float] = {}
         self._pc_pokemon_search: dict[str, Any] | None = None
         self._pc_structure_pointer_search: dict[str, Any] | None = None
         self._pc_discovery_progress: dict[str, Any] = {"status": "idle"}
@@ -146,6 +148,7 @@ class BizHawkDebugServer:
         self._client_threads: list[threading.Thread] = []
         self._file_position: int | None = None
         self._file_size_seen: int | None = None
+        self._last_fallback_reset_notice: float | None = None
         self._client_lock = threading.Lock()
         self._active_client: socket.socket | None = None
         self._coordinate_events: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=2048)
@@ -758,7 +761,7 @@ class BizHawkDebugServer:
                         "lua_run_id": lua_run_id,
                         "source": route,
                     }
-                LOGGER.info(
+                LOGGER.debug(
                     "Session PC layout discovery dispatched via %s: species=%d nickname=%r",
                     route,
                     species_id,
@@ -801,6 +804,7 @@ class BizHawkDebugServer:
         first_record_address: int,
         *,
         transport: str,
+        save_data_body_address: int | None = None,
     ) -> bool:
         if (
             not isinstance(lua_run_id, str)
@@ -813,7 +817,12 @@ class BizHawkDebugServer:
             LOGGER.error("Rejected invalid session PC cache request: run=%r address=%r", lua_run_id, first_record_address)
             return False
         command = f"PC_CACHE_SESSION_PC|{lua_run_id}|{first_record_address:08X}\n"
-        LOGGER.info("Sending PC cache-install command: %s", command.strip())
+        if save_data_body_address is not None:
+            if (isinstance(save_data_body_address, bool) or not isinstance(save_data_body_address, int)
+                    or not NDS_MAIN_RAM_BASE <= save_data_body_address <= NDS_MAIN_RAM_BASE + NDS_MAIN_RAM_SIZE - 0x20270):
+                return False
+            command = f"PC_CACHE_STRUCTURAL_PC|{lua_run_id}|{save_data_body_address:08X}|{first_record_address:08X}\n"
+        LOGGER.debug("Sending PC cache-install command: %s", command.strip())
         transports = (transport, "file" if transport == "tcp" else "tcp")
         for route in transports:
             sent = (
@@ -822,7 +831,7 @@ class BizHawkDebugServer:
             if sent:
                 with self._command_file_lock:
                     queue_depth = len(self._command_file_queue)
-                LOGGER.info(
+                LOGGER.debug(
                     "Session PC cache command dispatched via %s: run_id=%s first_record=0x%08X fallback_queue_depth=%d",
                     route,
                     lua_run_id,
@@ -830,7 +839,11 @@ class BizHawkDebugServer:
                     queue_depth,
                 )
                 return True
-        LOGGER.error("Could not dispatch session PC cache command for run_id=%s", lua_run_id)
+        LOGGER.error(
+            "Could not cache the PC layout: the emulator did not accept the command. "
+            "Check BizHawk is running the Lua script, then retry PC discovery."
+        )
+        LOGGER.debug("PC cache dispatch failed for run_id=%s", lua_run_id)
         return False
 
     def retry_session_pc_cache_install(self) -> bool:
@@ -844,12 +857,14 @@ class BizHawkDebugServer:
             address = int(str(pending["address"]), 16)
         except (KeyError, TypeError, ValueError):
             return False
-        command = f"PC_CACHE_SESSION_PC|{pending['lua_run_id']}|{address:08X}\n"
+        command = pending.get("command") or f"PC_CACHE_SESSION_PC|{pending['lua_run_id']}|{address:08X}\n"
         with self._command_file_lock:
             already_queued = command in self._command_file_queue
         sent = already_queued or self.cache_session_pc_layout(
             str(pending["lua_run_id"]), address,
             transport=str(pending.get("source") or "file"),
+            **({"save_data_body_address": pending["save_data_body_address"]}
+               if pending.get("save_data_body_address") is not None else {}),
         )
         if not sent:
             return False
@@ -933,7 +948,8 @@ class BizHawkDebugServer:
                 "error": reason,
                 "cache_install": dict(pending),
             }
-        LOGGER.error("PC cache confirmation failed: %s", reason)
+        LOGGER.error(pc_discovery_failure_message({"error": reason}))
+        LOGGER.debug("PC cache confirmation failed: %s", reason)
         if result_payload is not None and isinstance(result_payload.payload, dict):
             result = dict(result_payload.payload)
             result["pc_storage_resolver_status"] = status
@@ -1267,7 +1283,7 @@ class BizHawkDebugServer:
                 or pointer_search is not None
                 or sram_active is not None
             )
-            LOGGER.error(
+            LOGGER.debug(
                 "BizHawk output transport reset: old_size=%d new_size=%d reason=%s "
                 "initiator=%s discovery_active=%s active_scan_id=%s",
                 old_size,
@@ -1277,6 +1293,21 @@ class BizHawkDebugServer:
                 discovery_active,
                 active_scan_id,
             )
+            now = time.monotonic()
+            if discovery_active:
+                LOGGER.error(
+                    "Memory scan interrupted: the emulator output log was reset during the scan. "
+                    "Retry the scan after the connection settles; if it repeats, reload "
+                    "the BizHawk Lua script."
+                )
+                self._last_fallback_reset_notice = now
+            elif (self._last_fallback_reset_notice is None
+                    or now - self._last_fallback_reset_notice >= 5):
+                LOGGER.debug(
+                    "Emulator output log was truncated or rotated. The reader reset "
+                    "automatically; no active scan was interrupted. No action needed."
+                )
+                self._last_fallback_reset_notice = now
             if accumulator is not None:
                 error = (
                     "Discovery transport reset during active scan "
@@ -3104,7 +3135,11 @@ class BizHawkDebugServer:
             if sent:
                 LOGGER.debug("Acknowledged PC discovery cache: scan=%s via=%s", scan_id, route)
                 return
-        LOGGER.warning("Could not acknowledge PC discovery cache: scan=%s", scan_id)
+        LOGGER.warning(
+            "Could not release the completed PC scan cache. Check the BizHawk connection; "
+            "if this repeats, reload the Lua script."
+        )
+        LOGGER.debug("PC discovery acknowledgement failed: scan=%s", scan_id)
 
     def _acknowledge_pc_pokemon_search(self, scan_id: str, source: str) -> None:
         command = f"PC_ACK_POKEMON_SEARCH|{scan_id}\n"
@@ -3130,7 +3165,7 @@ class BizHawkDebugServer:
             ):
                 progress = accumulator.progress()
                 missing = progress["missing_chunk_indexes"]
-                LOGGER.info(
+                LOGGER.debug(
                     "PC discovery transport: scan_id=%s received=%d/%s highest_chunk=%d "
                     "next_unproduced=%d missing_count=%d oldest_missing_chunk=%s "
                     "seconds_since_last_chunk=%.1f end_received=%s producer_status=%s",
@@ -3466,7 +3501,7 @@ class BizHawkDebugServer:
             with self._pc_discovery_lock:
                 self._pc_discovery_scan = accumulator
                 self._pc_discovery_progress = accumulator.progress()
-            LOGGER.info(
+            LOGGER.debug(
                 "Python received PC discovery start: id=%s mode=%s bytes=%d anchor=%s "
                 "party_range_valid=%s party_records=%s party_count=%d party_record_size=%d",
                 scan_id,
@@ -3540,11 +3575,26 @@ class BizHawkDebugServer:
         with self._pc_discovery_lock:
             accumulator = self._pc_discovery_scan
             if accumulator is None or scan_id != accumulator.scan_id:
-                LOGGER.warning(
-                    "Ignoring PC discovery event for inactive scan: type=%s id=%s",
-                    message_type,
-                    scan_id,
-                )
+                now = time.monotonic()
+                previous_notice = self._inactive_pc_discovery_notices.get(scan_id)
+                if previous_notice is None or now - previous_notice >= 30:
+                    if (scan_id not in self._inactive_pc_discovery_notices
+                            and len(self._inactive_pc_discovery_notices) >= 64):
+                        del self._inactive_pc_discovery_notices[
+                            next(iter(self._inactive_pc_discovery_notices))
+                        ]
+                    self._inactive_pc_discovery_notices[scan_id] = now
+                    LOGGER.info(
+                        "Discarding leftover PC discovery data for inactive scan %s; "
+                        "further chunks will be ignored (possibly from before an app restart).",
+                        scan_id,
+                    )
+                # A restarted consumer cannot validate a partial scan. Once its
+                # producer finishes, release that scan's Lua retry cache by ID.
+                # Never acknowledge an active producer or interpolate arbitrary input.
+                if (message_type == "pc_discovery_end"
+                        and re.fullmatch(r"[A-Za-z0-9-]+", scan_id)):
+                    self._acknowledge_pc_discovery_scan(scan_id, source)
                 return
             if message_type == "pc_discovery_chunk":
                 try:
@@ -3893,7 +3943,14 @@ class BizHawkDebugServer:
             except (KeyError, TypeError, ValueError):
                 first_record_address = None
             lua_run_id = result.get("session_lua_run_id")
-            LOGGER.info(
+            body_address = self._event_address(result.get("session_save_data_body_address"))
+            cache_command = (
+                f"PC_CACHE_STRUCTURAL_PC|{lua_run_id}|{body_address:08X}|{first_record_address:08X}\n"
+                if body_address is not None and first_record_address is not None
+                else f"PC_CACHE_SESSION_PC|{lua_run_id}|{first_record_address:08X}\n"
+                if first_record_address is not None else None
+            )
+            LOGGER.debug(
                 "PC resolver discovery succeeded: scan=%s address=%s Lua run=%s "
                 "occupied=%s empty=%s invalid=%s",
                 accumulator.scan_id, result.get("session_pc_first_record_address"),
@@ -3905,10 +3962,8 @@ class BizHawkDebugServer:
                 self._pc_cache_install = {
                     "lua_run_id": lua_run_id,
                     "address": result.get("session_pc_first_record_address"),
-                    "command": (
-                        f"PC_CACHE_SESSION_PC|{lua_run_id}|{first_record_address:08X}\n"
-                        if first_record_address is not None else None
-                    ),
+                    "command": cache_command,
+                    "save_data_body_address": body_address,
                     "command_sent": False,
                     "command_queued": False,
                     "lua_received": False,
@@ -3927,6 +3982,7 @@ class BizHawkDebugServer:
                     lua_run_id,
                     first_record_address,
                     transport=source,
+                    **({"save_data_body_address": body_address} if body_address is not None else {}),
                 )
             )
             if not cache_sent:
@@ -3960,7 +4016,14 @@ class BizHawkDebugServer:
                             "cache_install": dict(pending),
                         }
         self._acknowledge_pc_discovery_scan(accumulator.scan_id, source)
-        LOGGER.info(
+        summary = result.get("pc_storage_discovery_summary", {})
+        if summary.get("error"):
+            LOGGER.warning(pc_discovery_failure_message(
+                summary, session_layout=accumulator.mode == "session_layout",
+            ))
+        else:
+            LOGGER.info("PC layout scan completed.")
+        LOGGER.debug(
             "PC discovery analysis %s: id=%s mode=%s candidates=%s",
             status,
             accumulator.scan_id,
@@ -3977,7 +4040,7 @@ class BizHawkDebugServer:
         occupied = payload.get("occupied_records")
         empty = payload.get("empty_records")
         malformed = payload.get("malformed_records")
-        LOGGER.info(
+        LOGGER.debug(
             "Python received PC cache confirmation: type=%s run=%s accepted=%s "
             "address=%s valid=%s empty=%s invalid=%s source=%s",
             payload.get("type"), lua_run_id, accepted, address,
@@ -4063,9 +4126,9 @@ class BizHawkDebugServer:
                             ),
                         }
             result["cache_validation"] = validation
-            LOGGER.info("PC cache validation details: %s", validation)
+            LOGGER.debug("PC cache validation details: %s", validation)
         if result.get("session_lua_run_id") != lua_run_id:
-            LOGGER.warning(
+            LOGGER.debug(
                 "Session PC cache rejected after Lua run changed: expected=%s observed=%s",
                 result.get("session_lua_run_id"),
                 lua_run_id,
@@ -4116,7 +4179,16 @@ class BizHawkDebugServer:
                 "error": None if accepted else result.get("pc_storage_resolver_error"),
                 "cache_install": dict(pending) if pending is not None else None,
             }
-        LOGGER.info(
+        if accepted:
+            if result.get("pc_storage_resolver_method") == "save_table" and occupied == 0 and empty == 540:
+                LOGGER.info("PC storage verified: all 540 slots are empty. Monitoring for deposits.")
+            else:
+                LOGGER.info("PC layout cached and verified by the emulator.")
+        else:
+            LOGGER.warning(pc_discovery_failure_message({
+                "error": "PC cache rejected: " + str(result.get("pc_storage_resolver_error") or ""),
+            }))
+        LOGGER.debug(
             "Lua session PC cache acknowledgement: run_id=%s accepted=%s address=%s",
             lua_run_id,
             accepted,

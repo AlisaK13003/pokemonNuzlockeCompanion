@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -27,7 +29,6 @@ from pokemon_ev_tracker.core.nuzlocke.death_detection import (
 )
 from pokemon_ev_tracker.core.nuzlocke.fights import build_fight_timeline
 from pokemon_ev_tracker.core.nuzlocke.models import (
-    ENCOUNTER_STATUSES,
     EncounterRecord,
     EncounterStatus,
     NuzlockeGameProfile,
@@ -49,6 +50,7 @@ from pokemon_ev_tracker.ui.nuzlocke_dialogs import (
 )
 from pokemon_ev_tracker.ui.nuzlocke_panels import RunPanel, run_label
 from pokemon_ev_tracker.ui.nuzlocke_workspace import build_run_workspace
+from pokemon_ev_tracker.ui.run_design import VISIBLE_STATUSES, install_run_design
 from pokemon_ev_tracker.ui.sprite_loader import get_static_sprite
 from pokemon_ev_tracker.ui.theme import COLORS, refresh_style
 
@@ -93,6 +95,7 @@ class NuzlockeView(QWidget):
         self._shown_ram_death_key: tuple[str, str] | None = None
 
         build_run_workspace(self)
+        install_run_design(self)
         if settings is not None:
             self.wipe_action_input.blockSignals(True)
             self.no_run_prompt_input.blockSignals(True)
@@ -113,7 +116,55 @@ class NuzlockeView(QWidget):
     def set_party_levels(self, members: tuple[PartyLevel, ...]) -> None:
         self.party_levels = members
         self._refresh_cap_panel()
+        self.fight_line.refresh(self.fight_timeline())
+        timeline = self.fight_timeline()
+        fight = timeline.next_fight if timeline else None
+        self.hero_fight_title.setText(f"Next: {fight.name}" if fight else "All fights complete" if timeline else "No active run")
+        self.hero_cap_value.setText(str(fight.effective_level_cap) if fight else "—")
+        self.hero_cap_warning.setText(
+            f"{fight.over_count} party members above cap" if fight and fight.over_count else "")
+        self.readiness.refresh(self._party_cards, self.fight_timeline())
         self.presentation_changed.emit()
+
+    def set_party_cards(self, cards) -> None:
+        self._party_cards = cards
+        self.readiness.refresh(cards, self.fight_timeline())
+
+    def _edit_ledger_location(self, location_id) -> None:
+        self.encounter_filter.setCurrentIndex(0)
+        self._render_encounters()
+        for row in range(self.encounters_table.rowCount()):
+            item = self.encounters_table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == location_id:
+                self.encounters_table.setCurrentCell(row, 0)
+                self._edit_selected_encounter()
+                break
+
+    def _open_manage_locations(self) -> None:
+        run = self.store.active_run
+        if run:
+            self.manage_locations.open_run(run, self._active_profile())
+            self.show_section("Manage locations")
+
+    def _locations_saved(self) -> None:
+        self._refresh_all()
+        self.show_section("Dashboard")
+
+    def _finish_run(self) -> None:
+        from pokemon_ev_tracker.ui.nuzlocke_dialogs import FinishRunDialog
+        run = self.store.active_run
+        if not run:
+            return
+        dialog = FinishRunDialog(run.name, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        try:
+            self.store.set_run_status(run.run_id, dialog.outcome.currentData(), dialog.notes.toPlainText())
+        except (OSError, ValueError) as error:
+            self._show_error("Could not finish run", error)
+            return
+        self._refresh_all()
+        self.show_section("Run Library")
 
     def fight_timeline(self):
         run = self.store.active_run
@@ -131,25 +182,32 @@ class NuzlockeView(QWidget):
                 QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight
             )
         self.metric_strip.setVisible(not narrow)
-        self.summary_label.setVisible(narrow)
+        self.summary_label.hide()
         super().resizeEvent(event)
 
     def show_section(self, name: str) -> None:
+        self.run_back_button.setVisible(name != "Dashboard")
         for index in range(self.sections.count()):
             if self.sections.tabText(index).casefold() == name.casefold():
                 self.sections.setCurrentIndex(index)
+                self._update_section_visibility()
                 return
 
     def _update_section_visibility(self, *_args) -> None:
         has_run = self.store.active_run is not None
         library = self.sections.tabText(self.sections.currentIndex()) == "Run Library"
-        self.run_header.setVisible(has_run and not library)
+        managing = self.sections.tabText(self.sections.currentIndex()) == "Manage locations"
+        self.run_back_button.setVisible(self.sections.currentIndex() != 0 and not managing and not library)
+        self.run_header.setVisible(has_run and not library and not managing)
         self.empty_panel.setVisible(not has_run and not library)
         self.sections.setVisible(has_run or library)
 
     def set_pc_monitor_status(self, text: str) -> None:
         """Presentation adapter for the existing runtime's PC monitor summary."""
-        self.pc_monitor_label.setText(text or "PC monitor status unavailable.")
+        text = text or "PC monitor status unavailable."
+        if self.pc_monitor_label.text() == text:
+            return
+        self.pc_monitor_label.setText(text)
         self.presentation_changed.emit()
 
     def _open_preview_encounter(self, index) -> None:
@@ -226,6 +284,10 @@ class NuzlockeView(QWidget):
             self.run_library_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, run.run_id)
         self._update_library_actions()
 
+        self.library_cards.refresh(shown)
+        self.run_library_table.setFixedHeight(max(100, len(shown) * 38 + 36))
+        self.run_library_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
     def _show_historical_run(self, run) -> None:
         RunHistoryDialog(run, self.profiles.get(run.game), self).exec()
 
@@ -233,6 +295,11 @@ class NuzlockeView(QWidget):
         """Read-only projection of existing run records; no detection runs here."""
         # TODO: per-fight notes require a validated model/storage contract; only run notes exist.
         run, profile = self.store.active_run, self._active_profile()
+        self.ledger.refresh(run, profile)
+        self.shiny_clause.refresh(run)
+        self.fight_line.refresh(self.fight_timeline())
+        self.readiness.refresh(self._party_cards, self.fight_timeline())
+        self.finish_run_button.setEnabled(run is not None)
         if not run:
             self.encounter_preview.setRowCount(0)
             self.pending_warning_label.clear()
@@ -244,9 +311,19 @@ class NuzlockeView(QWidget):
         self.run_title_label.setText(run.name)
         state = run.status
         game = profile.display_name if profile else f"Unsupported profile: {run.game}"
-        self.run_metadata_label.setText(f"{state.upper()} · {game}")
+        try:
+            started = datetime.fromisoformat(run.started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            days = max(0, (datetime.now(UTC) - started).days)
+            age = "Started today" if days == 0 else f"Started {days} day{'s' if days != 1 else ''} ago"
+        except (TypeError, ValueError):
+            age = "Start date unavailable"
+        self.run_metadata_label.setText(f"{game} · {age}")
+        self.hero_run_state.setText(f"{state.upper()} RUN")
         for key, label in self.run_metrics.items():
-            label.setText(str(getattr(summary, key)))
+            value = sum(not _encounter_is_unused(record) for record in run.encounters.values()) if key == "encounters" else getattr(summary, key)
+            label.setText(str(value))
         records = [record for record in run.encounters.values() if not _encounter_is_unused(record)]
         self.encounter_preview.setRowCount(min(5, len(records)))
         self.preview_empty_label.setVisible(not records)
@@ -269,6 +346,10 @@ class NuzlockeView(QWidget):
         )
         self.review_pending_button.setVisible(bool(pending))
         events = []
+        for shiny in run.shiny_encounters:
+            events.append((shiny.detected_at, (
+                f"Shiny {shiny.nickname or shiny.species_name} · {shiny.location_name} · shiny clause"
+            )))
         for event in run.acquisition_events:
             status = "reviewed" if event.stable_id in run.resolved_acquisition_ids else "pending"
             events.append((event.detected_at, (
@@ -283,6 +364,21 @@ class NuzlockeView(QWidget):
             or "No detection events recorded."
         )
         self.presentation_changed.emit()
+
+    def _add_shiny_manually(self) -> None:
+        from pokemon_ev_tracker.ui.shiny_clause import AddShinyDialog
+        run = self.store.active_run
+        if run is None:
+            return
+        dialog = AddShinyDialog(run, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        try:
+            self.store.record_shiny_encounters(run.run_id, (dialog.record(),))
+        except (OSError, ValueError) as error:
+            self._show_error("Could not record shiny encounter", error)
+            return
+        self._refresh_all()
 
     def move_ram_death_notification(self, parent: QWidget) -> None:
         self._run_content_layout.removeWidget(self.ram_death_group)
@@ -324,7 +420,7 @@ class NuzlockeView(QWidget):
         self._responsive_rows.append(controls)
         self.encounter_filter = QComboBox()
         self.encounter_filter.addItem("All statuses", "")
-        for status in ENCOUNTER_STATUSES:
+        for status in VISIBLE_STATUSES:
             self.encounter_filter.addItem(_STATUS_LABELS[status], status)
         self.encounter_filter.currentIndexChanged.connect(self._render_encounters)
         controls.addWidget(QLabel("Filter"))
@@ -525,6 +621,12 @@ class NuzlockeView(QWidget):
             self.acquisition_group.setVisible(False)
             return
         self.acquisition_group.setVisible(True)
+        if self.settings and self.settings.encounter_action == "IGNORE":
+            try:
+                for event in pending_acquisition_events(run):
+                    self.store.resolve_acquisition(run.run_id, event.stable_id)
+            except OSError as error:
+                self._show_error("Could not ignore encounter", error)
         if self._try_auto_record_pending(run):
             self._refresh_all()
             return
@@ -931,6 +1033,8 @@ class NuzlockeView(QWidget):
         if not self.profiles:
             return
         dialog = NewRunDialog(tuple(self.profiles.values()), self)
+        if self.store.active_run:
+            dialog.active_run_notice.setText("The current run remains in the library as an ongoing run. This new run will become active.")
         preferred = self._active_profile() or next(iter(self.profiles.values()))
         dialog.game_input.setCurrentIndex(dialog.game_input.findData(preferred.game_id))
         dialog.name_input.setText(self.store.suggest_next_run_name(preferred))
@@ -938,7 +1042,9 @@ class NuzlockeView(QWidget):
             return
         name, profile = dialog.values()
         try:
-            self.store.create_run(name, profile)
+            created = self.store.create_run(name, profile)
+            if self.settings and self.settings.encounter_action == "AUTOMATIC":
+                self.store.set_auto_record_unambiguous(created.run_id, True)
         except (OSError, ValueError) as error:
             self._show_error("Could not create run", error)
             return
@@ -1015,7 +1121,7 @@ class NuzlockeView(QWidget):
                         item.setBackground(QColor(color))
                 self.encounters_table.setItem(row, column, item)
             status_box = QComboBox()
-            for status in ENCOUNTER_STATUSES:
+            for status in VISIBLE_STATUSES + ((encounter.status,) if encounter.status not in VISIBLE_STATUSES else ()):
                 status_box.addItem(_STATUS_LABELS[status], status)
             status_box.setCurrentIndex(status_box.findData(encounter.status))
             status_box.setProperty("encounterStatus", encounter.status)

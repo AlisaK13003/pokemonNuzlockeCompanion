@@ -33,7 +33,7 @@ include = ["pokemon_ev_tracker*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-pokemon_ev_tracker = ["assets/sprites/**/*.png", "assets/sprites/**/*.gif", "assets/sprites/**/*.webp", "assets/ui/*.svg"]
+pokemon_ev_tracker = ["assets/sprites/**/*.png", "assets/sprites/**/*.gif", "assets/sprites/**/*.webp", "assets/ui/*.svg", "assets/fonts/*.ttf", "assets/fonts/*OFL.txt"]
 "pokemon_ev_tracker.games.platinum" = ["data/*.json"]
 "pokemon_ev_tracker.pokemon.gen4" = ["data/*.json"]
 

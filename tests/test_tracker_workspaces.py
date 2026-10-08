@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
-from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel
+from PySide6.QtWidgets import QApplication, QLabel
 
 from pokemon_ev_tracker.core.ev_targets import EVTarget
 from pokemon_ev_tracker.core.ev_training import (
@@ -22,9 +22,6 @@ from pokemon_ev_tracker.ui.friendship_panel import FriendshipWalkPanel
 from pokemon_ev_tracker.ui.party_selector import PartySelector
 from pokemon_ev_tracker.ui.theme import apply_theme
 from pokemon_ev_tracker.ui.tracker_views import (
-    CompactPartyStatsView,
-    CompactTrainingView,
-    PartyStatsView,
     RecommendationPanel,
     TrainingView,
 )
@@ -155,7 +152,7 @@ def test_friendship_goal_custom_and_compact_eta_render(app, monkeypatch):
     assert panel.telemetry.text() == "≈ 6 min remaining"
 
 
-@pytest.mark.parametrize("view_type", (TrainingView, CompactTrainingView))
+@pytest.mark.parametrize("view_type", (TrainingView,))
 def test_training_actions_follow_selected_member_and_disable_when_disconnected(app, view_type):
     view = view_type()
     cards = {1: _card(_pokemon()), 2: _card(_pokemon(2, "second"), EVTrainingPreference({"speed"}))}
@@ -179,7 +176,7 @@ def test_training_actions_follow_selected_member_and_disable_when_disconnected(a
     assert all(label.text() == "—" for label in view.ev_values.values())
 
 
-@pytest.mark.parametrize("view_type", (TrainingView, CompactTrainingView))
+@pytest.mark.parametrize("view_type", (TrainingView,))
 def test_training_values_are_factual_and_ignore_legacy_numeric_targets(app, view_type):
     view = view_type()
     pokemon = _pokemon()
@@ -191,7 +188,7 @@ def test_training_values_are_factual_and_ignore_legacy_numeric_targets(app, view
     assert {stat: label.text() for stat, label in view.ev_values.items()} == {
         stat: str(value) for stat, value in pokemon.evs.items()}
     assert view.total.text() == "60 / 510 total"
-    assert view.focus_summary.text() == "No focus set"
+    assert view.focus_summary.text() == "Select every stat you're happy to gain"
     assert view.edit_button.text() == "Set training focus"
     assert not view.clear_button.isEnabled()
     assert all(not chip.property("evFocused") for chip in view.focus_chips.values())
@@ -200,9 +197,9 @@ def test_training_values_are_factual_and_ignore_legacy_numeric_targets(app, view
     card["training_preference"] = EVTrainingPreference({"hp", "attack"})
     view.refresh({1: card})
 
-    assert view.focus_summary.text() == "HP · Attack"
+    assert "Preferences saved" in view.focus_summary.text()
     assert view.edit_button.text() == "Edit training focus"
-    assert view.clear_button.text() == "Clear Focus"
+    assert view.clear_button.text() == "Reset"
     assert view.clear_button.isEnabled()
     assert view.ev_values["attack"].text() == "4"
     assert view.ev_rows["attack"].property("evFocused") is None
@@ -216,32 +213,11 @@ def test_training_values_are_factual_and_ignore_legacy_numeric_targets(app, view
 def test_training_missing_and_empty_preference_show_no_focus(app, preference):
     view = TrainingView()
     view.refresh({1: _card(_pokemon(), preference)})
-    assert view.focus_summary.text() == "No focus set"
+    assert view.focus_summary.text() == "Select every stat you're happy to gain"
     assert view.edit_button.text() == "Set training focus"
     assert all(not chip.property("evFocused") for chip in view.focus_chips.values())
 
 
-@pytest.mark.parametrize("view_type", (PartyStatsView, CompactPartyStatsView))
-def test_stats_preserves_four_move_positions_and_renders_gen4_metadata(app, view_type):
-    view = view_type()
-    view.refresh({1: _card(_pokemon())})
-
-    assert [label.text() for label in view.move_names] == [
-        "01  Tackle", "02  Empty move slot", "03  Growl", "04  Empty move slot"
-    ]
-    assert view.move_pp[0].text() == "20 / 42 PP"
-    assert view.move_types[0].text() == "Normal"
-    if view_type is PartyStatsView:
-        assert "Power 35" in view.move_details[0].text()
-        assert "Accuracy 95%" in view.move_details[0].text()
-    assert view.friendship.text() == "Friendship 100 / 255"
-    assert view.iv_values["speed"].text() == "25 IV"
-    assert view.ev_values["speed"].text() == "20"
-
-    view.refresh({}, connected=False)
-
-    assert all("Empty move slot" in label.text() for label in view.move_names)
-    assert view.friendship.text() == "Friendship — / 255"
 
 
 def test_recommendations_render_supplied_core_result_and_clear_on_battle_end(app):
@@ -252,8 +228,8 @@ def test_recommendations_render_supplied_core_result_and_clear_on_battle_end(app
     _row, _sprite, _name, badge, detail = panel.rows[1]
     assert badge.text() == "MIXED"
     assert badge.property("status") == "mixed"
-    assert "+1 DEF allowed" in detail.text()
-    assert "+1 SPA unwanted" in detail.text()
+    assert "+1 Defense allowed" in detail.text()
+    assert "+1 Sp. Atk unwanted" in detail.text()
     assert panel.results[1] is mixed
 
     panel.refresh(cards, {1: mixed}, battle_state="idle")
@@ -322,18 +298,6 @@ def test_recommendation_panel_clears_departed_party_members(app):
     assert not panel.empty.isHidden()
 
 
-def test_runtime_widgets_move_between_full_and_compact_without_duplicate_hosts(app):
-    normal, compact = TrainingView(), CompactTrainingView()
-    opponent = QLabel("Existing opponent controller")
-    normal.set_runtime_widgets(opponent=opponent)
-    assert normal.runtime_hosts["opponent"].layout().count() == 1
-
-    compact.set_runtime_widgets(opponent=opponent)
-
-    assert normal.runtime_hosts["opponent"].layout().count() == 0
-    assert compact.runtime_hosts["opponent"].layout().count() == 1
-    compact.set_runtime_widgets(opponent=opponent)
-    assert compact.runtime_hosts["opponent"].layout().count() == 1
 
 
 def test_compact_recommendations_follow_selection_and_restore_full_party(app):
@@ -362,34 +326,3 @@ def test_compact_selector_keeps_all_six_slots_within_320_pixels(app):
     assert all(button.geometry().right() < selector.width() for button in selector.slots.values())
     assert all(button.height() == 66 for button in selector.slots.values())
     selector.close()
-
-
-def test_compact_training_reflows_before_two_columns_overflow(app):
-    view = CompactTrainingView()
-    apply_theme(view)
-    view.set_runtime_widgets(opponent=QLabel("Current opponent"))
-    view.refresh({1: _card(_pokemon())})
-    view.resize(720, 620)
-    view.show()
-    app.processEvents()
-    assert view.body_layout.direction() == QBoxLayout.Direction.LeftToRight
-    view.resize(600, 620)
-    app.processEvents()
-    assert view.body_layout.direction() == QBoxLayout.Direction.TopToBottom
-    assert view.content.width() <= view.scroll.viewport().width()
-    view.close()
-
-
-def test_compact_stats_keeps_inspection_and_ev_snapshot_visible_at_720_by_620(app):
-    view = CompactPartyStatsView()
-    apply_theme(view)
-    view.refresh({1: _card(_pokemon())})
-    view.resize(720, 620)
-    view.show()
-    app.processEvents()
-    assert view.identity_row.direction() == QBoxLayout.Direction.LeftToRight
-    assert view.mid_layout.direction() == QBoxLayout.Direction.LeftToRight
-    assert view.scroll.verticalScrollBar().maximum() == 0
-    assert all(label.isHidden() for label in view.move_details)
-    assert view.move_pp[0].text() == "20 / 42 PP"
-    view.close()

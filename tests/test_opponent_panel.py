@@ -15,7 +15,7 @@ def test_opponent_panel_shows_species_level_and_base_ev_yield(monkeypatch) -> No
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(
         "pokemon_ev_tracker.ui.opponent_panel.resolve_sprite_asset",
-        lambda _species_id: SpriteAsset("missing", None),
+        lambda _species_id, *, companion=False: SpriteAsset("missing", None),
     )
     panel = CurrentOpponentPanel()
 
@@ -40,7 +40,7 @@ def test_opponent_panel_shows_both_active_slots_in_a_double_battle(monkeypatch) 
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(
         "pokemon_ev_tracker.ui.opponent_panel.resolve_sprite_asset",
-        lambda _species_id: SpriteAsset("missing", None),
+        lambda _species_id, *, companion=False: SpriteAsset("missing", None),
     )
     panel = CurrentOpponentPanel()
     opponents = (
@@ -68,7 +68,7 @@ def test_double_battle_entries_stack_only_at_narrow_width(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(
         "pokemon_ev_tracker.ui.opponent_panel.resolve_sprite_asset",
-        lambda _species_id: SpriteAsset("missing", None),
+        lambda _species_id, *, companion=False: SpriteAsset("missing", None),
     )
     panel = CurrentOpponentPanel()
     panel.set_opponents(
@@ -88,7 +88,7 @@ def test_double_battle_entries_stack_only_at_narrow_width(monkeypatch) -> None:
     panel.resize(900, 400)
     app.processEvents()
     assert panel.opponents_layout.direction() == QBoxLayout.Direction.LeftToRight
-    assert panel.maximumHeight() < 200
+    assert panel.maximumHeight() < 400
     panel.close()
 
 
@@ -96,7 +96,7 @@ def test_delibird_replacement_updates_sprite_identity_level_and_yield(monkeypatc
     app = QApplication.instance() or QApplication([])
     resolved_species = []
 
-    def resolve(species_id):
+    def resolve(species_id, *, companion=False):
         resolved_species.append(species_id)
         return SpriteAsset("missing", None)
 

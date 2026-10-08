@@ -340,7 +340,7 @@ def test_main_window_binds_debug_opponents_to_visible_tracker_cards(
     monkeypatch.setattr(AppSettings, "save_default", lambda _self: None)
     monkeypatch.setattr(
         "pokemon_ev_tracker.ui.opponent_panel.resolve_sprite_asset",
-        lambda species_id: SpriteAsset("static", Path(f"{species_id}.png")),
+        lambda species_id, *, companion=False: SpriteAsset("static", Path(f"{species_id}.png")),
     )
     pixmap = QPixmap(8, 8)
     pixmap.fill()
@@ -389,7 +389,7 @@ def test_main_window_binds_debug_opponents_to_visible_tracker_cards(
         enemies = active_enemy_battlers(battlers)
         return DataSourceSnapshot(
             backend_name="BizHawk RAM",
-            connected=False,
+            connected=True,
             details={
                 "heartbeat": None,
                 "party_state": party_state,
@@ -426,7 +426,7 @@ def test_main_window_binds_debug_opponents_to_visible_tracker_cards(
     app.processEvents()
 
     panel = window.current_opponent_panel
-    assert not double_battle.connected
+    assert double_battle.connected
     assert "Enemy 1: Machop, Lv. 14" in window.ram_party_details.toPlainText()
     assert "Enemy 2: Weedle, Lv. 13" in window.ram_party_details.toPlainText()
     assert any(len(received) == 2 for received in panel_received)

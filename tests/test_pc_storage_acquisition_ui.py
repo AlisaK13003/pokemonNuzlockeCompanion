@@ -128,6 +128,7 @@ def _box_mon(
         origin_game=12,
         egg_location_id=0,
         is_egg=False,
+        is_shiny=False,
         pid=pid,
         checksum=0x1234,
         calculated_checksum=0x1234,
@@ -711,6 +712,8 @@ def test_cache_confirmation_failure_is_visible_and_retry_dispatches(tmp_path, mo
     assert "expected_species_id=415" in details
     assert "bytes_match=True" in details
     assert window.pc_storage_retry_cache_button.isEnabled()
+    assert "did not confirm its cache" in window.pc_storage_recovery_label.text()
+    assert "Reload the BizHawk Lua script" in window.pc_storage_recovery_label.text()
     window.pc_storage_retry_cache_button.click()
     assert source.pc_cache_retry_requests == 1
     assert window.pc_storage_resolver_status_label.text() == "PC resolver: cache-pending"
@@ -891,7 +894,9 @@ def test_failed_pc_anchor_reveals_recovery_fields(tmp_path, monkeypatch) -> None
     source.current_snapshot = failed
     window._refresh_ram_backend_debug()
     assert not window.pc_storage_anchor_recovery.isHidden()
-    assert "Box 1 Slot 1 may be empty" in window.pc_storage_recovery_label.text()
+    assert "If your PC is empty, party tracking still works" in window.pc_storage_recovery_label.text()
+    assert "retry PC discovery" in window.pc_storage_recovery_label.text()
+    assert "Rediscover PC layout automatically" in window.pc_storage_recovery_label.text()
     assert window.pc_storage_status_label.text() == "Status: Monitoring paused"
     window.pc_layout_nickname_edit.setText("newmon")
     window.pc_layout_retry_button.click()

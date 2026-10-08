@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from pokemon_ev_tracker.core.nuzlocke.acquisition import AcquisitionCandidate
 from pokemon_ev_tracker.data_sources.bizhawk import BizHawkRamDataSource
+from pokemon_ev_tracker.games.platinum.abilities import get_platinum_ability
 from pokemon_ev_tracker.games.platinum.battle import decode_battle_battlers
 from pokemon_ev_tracker.games.platinum.coordinate_discovery import (
     MAX_SCAN_BYTES,
@@ -18,7 +20,7 @@ from pokemon_ev_tracker.games.platinum.ev_yields import (
     format_ev_yield_summary,
     get_training_ev_yield,
 )
-from pokemon_ev_tracker.games.platinum.items import get_gen4_item_hint
+from pokemon_ev_tracker.games.platinum.items import get_gen4_item_hint, get_gen4_item_name
 from pokemon_ev_tracker.games.platinum.locations import (
     classify_platinum_acquisition,
     platinum_nuzlocke_location_id,
@@ -52,6 +54,7 @@ class PlatinumPCStorage:
 class PokemonPlatinumProvider:
     game_id = PLATINUM_PROFILE.game_id
     display_name = PLATINUM_PROFILE.display_name
+    field_session_title = "Sinnoh field session"
     generation = "Generation IV"
     platform = "Nintendo DS"
     emulator = "BizHawk / EmuHawk"
@@ -60,7 +63,7 @@ class PokemonPlatinumProvider:
         friendship_walk=True, pc_storage=True, nuzlocke=True,
         death_detection=True, wipe_detection=True, move_metadata=True,
         player_position=True)
-    theme = GameTheme("#78dccb", "#9bbeff", "platinum")
+    theme = GameTheme("#a6baff", "#c4b5e8", "platinum")
     profile = PLATINUM_PROFILE
     party_decoder = PLATINUM_PROFILE.party_decoder
     battle_reader = staticmethod(decode_battle_battlers)
@@ -86,6 +89,25 @@ class PokemonPlatinumProvider:
     def make_data_source(self):
         return BizHawkRamDataSource(profile=self.profile)
 
+    def boxed_inspection(self, pokemon):
+        """Project validated box facts; a met level is never a current level."""
+        decoded = pokemon.decoded
+        ability = get_platinum_ability(pokemon.species_id, getattr(decoded, 'ability_id', None) or 0)
+        facts = {
+            "slot": pokemon.slot_index, "species_id": pokemon.species_id,
+            "species": pokemon.species_name, "nickname": decoded.nickname or pokemon.species_name,
+            "stable_id": pokemon.stable_id, "checksum_valid": pokemon.checksum_valid,
+            "level": None, "current_hp": None, "max_hp": None,
+            "held_item_name": get_gen4_item_name(getattr(decoded, 'held_item_id', None) or 0),
+            "friendship": getattr(decoded, 'friendship', None), "ability_name": ability.name,
+            "nature_name": getattr(decoded, 'nature_name', None),
+            "nature_increased_stat": getattr(decoded, 'nature_increased_stat', None),
+            "nature_decreased_stat": getattr(decoded, 'nature_decreased_stat', None),
+        }
+        for stat in ("hp", "attack", "defense", "special_attack", "special_defense", "speed"):
+            facts[f"{stat}_iv"] = getattr(getattr(decoded, 'ivs', None), stat, None)
+        return SimpleNamespace(**facts)
+
     def species_catalog(self):
         return load_gen4_species()
 
@@ -105,7 +127,7 @@ class PokemonPlatinumProvider:
             pokemon.stable_id, pokemon.species_id, pokemon.species, nickname,
             pokemon.level, pokemon.met_level, pokemon.met_location_id,
             pokemon.met_location_name, pokemon.egg_location_id, pokemon.origin_game,
-            pokemon.is_egg, source_location="PARTY")
+            pokemon.is_egg, source_location="PARTY", is_shiny=pokemon.is_shiny)
 
     def boxed_acquisition_candidate(self, pokemon) -> AcquisitionCandidate:
         decoded = pokemon.decoded
@@ -117,4 +139,4 @@ class PokemonPlatinumProvider:
             decoded.met_level, decoded.met_level, decoded.met_location_id,
             pokemon.met_location_name, decoded.egg_location_id, decoded.origin_game,
             decoded.is_egg, source_location="BOX", box_index=pokemon.box_index,
-            slot_index=pokemon.slot_index)
+            slot_index=pokemon.slot_index, is_shiny=decoded.is_shiny)
