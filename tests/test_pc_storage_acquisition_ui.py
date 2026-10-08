@@ -760,15 +760,15 @@ def test_session_pc_auto_discovery_once_and_new_run_restarts_it(tmp_path, monkey
     assert window.pc_storage_status_label.text() == "Status: Discovering PC layout"
     assert window.pc_storage_progress_label.text() == "Progress: 42%"
 
-    window._pc_storage_tracking_active = True
-    window._pc_storage_baseline_ids.add("old-session-pokemon")
+    window.acquisitions._tracking = True
+    window.acquisitions._baseline_ids.add("old-session-pokemon")
     source.current_snapshot = _session_pc_snapshot(run_id="new-lua-run")
     window._refresh_ram_backend_debug()
     window._refresh_ram_backend_debug()
     assert source.pc_layout_requests == [(415, "mitsu"), (415, "mitsu")]
     assert window._pc_lua_run_id == "new-lua-run"
-    assert not window._pc_storage_tracking_active
-    assert window._pc_storage_baseline_ids == set()
+    assert not window.acquisitions._tracking
+    assert window.acquisitions._baseline_ids == set()
     window.close()
     assert app is not None
 
@@ -796,7 +796,7 @@ def test_session_pc_auto_baseline_monitor_stale_and_manual_recovery(
         progress_status="completed", frame=120,
     )
     window._refresh_ram_backend_debug()
-    assert window._pc_storage_baseline_ids == {existing.stable_id}
+    assert window.acquisitions._baseline_ids == {existing.stable_id}
     assert window.pc_storage_status_label.text() == "Status: Monitoring"
     assert window.pc_storage_last_event_label.text() == (
         "Last PC event: Baseline established with 1 Pokemon."
@@ -821,14 +821,14 @@ def test_session_pc_auto_baseline_monitor_stale_and_manual_recovery(
     disconnected = replace(source.current_snapshot, connected=False)
     source.current_snapshot = disconnected
     window._refresh_ram_backend_debug()
-    assert window._pc_storage_baseline_ids == {existing.stable_id}
+    assert window.acquisitions._baseline_ids == {existing.stable_id}
     source.current_snapshot = _session_pc_snapshot(
         (existing,), resolver="resolved for this session", enabled=True,
         progress_status="completed", frame=150,
     )
     window._refresh_ram_backend_debug()
     assert source.pc_layout_requests == [(415, "mitsu")]
-    assert window._pc_storage_baseline_ids == {existing.stable_id}
+    assert window.acquisitions._baseline_ids == {existing.stable_id}
 
     boxed_catch = _box_mon(pid=0x10203040, nickname="newcatch")
     boxed_catch.slot_index = 2
@@ -850,7 +850,7 @@ def test_session_pc_auto_baseline_monitor_stale_and_manual_recovery(
     window._refresh_ram_backend_debug()
     window._refresh_ram_backend_debug()
     assert source.pc_layout_requests == [(415, "mitsu"), (415, "mitsu")]
-    assert not window._pc_storage_tracking_active
+    assert not window.acquisitions._tracking
     assert window.pc_storage_status_label.text() == "Status: Discovering PC layout"
 
     source.current_snapshot = _session_pc_snapshot(

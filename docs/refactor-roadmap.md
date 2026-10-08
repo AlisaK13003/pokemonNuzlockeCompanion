@@ -904,3 +904,129 @@ Do not proceed automatically into that extraction or Phase D.
 Live emulator acknowledgement/reconnect/PC-discovery and real-save smoke checks
 remain manual validation work; synthetic regression coverage and builds do not
 replace them. No user save data was modified, and no commit or push was requested.
+
+## Phase C5 audit and selected boundary (before implementation)
+
+C4 recommends extracting PC acquisition baseline ownership/reset transitions before
+discovery dispatch. C5 follows that recommendation and includes the adjacent
+ordered party/PC reconciliation and acquisition observers. Discovery, raw RAM
+validation gates, provider projections, notifications and final confirmation UI
+remain separate; extracting the entire PC runtime would be a riskier expansion.
+
+| Existing owner | Responsibility / ordering | C5 boundary |
+| --- | --- | --- |
+| MainWindow poll | Provider converts raw party and validated stable PC records into candidates; party validity and PC session/cache/freshness/in-flight/failure gates | Keep gates/provider interpretation unchanged; pass typed candidate observations |
+| MainWindow | Two observers; PC source baseline key `(payload.run_id, nuzlocke.run_id)`, baseline/addition/emitted identity sets | One coordinator owns observers and baseline state; reset called by existing discovery/session recovery paths |
+| Core acquisition/store | First starter once per persisted run; location/history dedup; Shiny Clause separate ledger; pending suggestions | Reuse these functions and store methods without duplicating policy |
+| Game provider | Stable identity, nickname/species projections and game-specific classification | Explicit coordinator dependency for classification; no new game decoding |
+| MainWindow | PC baseline first (outside acquisition OSError catch), starter, party shinies, PC shinies, normal reconciliation, notices and view refresh, party observation, PC observation | Preserve exact order, including UI publication before observer work and existing error boundaries |
+| MainWindow diagnostics | Latest observer/suppression trace, monotonic display watermark, last PC event wording | Read observer decisions/counts from coordinator; retain presentation watermark and combined discovery/acquisition event text |
+| NuzlockeView/notification actions | Review/replace/extra/ignore, occupied locations and active-run checks | Stay unchanged; no automatic confirmation policy moves |
+
+Persisted observed identities remain shared across party and PC, so moving a
+member between sources cannot manufacture a capture. Party observer resets on
+disconnect; PC observer deliberately retains state. Run changes baseline each
+observer and the PC source; discovery/session invalidation explicitly resets only
+the PC baseline. Each poll keeps its captured run through reconciliation/UI
+publication even if the application active-run selection changes mid-poll.
+
+Five new full-poll characterization cases passed before extraction for stage
+ordering, duplicate snapshots, disconnect/reconnect, stale PC recovery and run
+switching. Existing starter/shiny/acquisition/PC tests also characterized the
+business rules before production changes (76 passed; one new fixture initially
+attempted to mutate a frozen snapshot and was corrected, then all five new cases
+passed). No production defect was implicated by that fixture error.
+
+## Phase C5: acquisition and reconciliation coordinator
+
+Implemented the selected PC-baseline/ordered acquisition boundary only.
+`core/nuzlocke/acquisition_coordinator.py` introduces `AcquisitionCoordinator`,
+frozen `AcquisitionObservation`, `ReconciledEncounters` and `ObservedAcquisitions`.
+Provider and store dependencies are explicit. Candidate/run objects remain their
+existing models; there is no second store/run or RAM decoding. Its lifecycle
+interface is `prepare_pc`, `process`, and `reset_pc`, with focused read-only
+count/baseline queries and existing observer decision projections.
+
+The coordinator owns both observers, PC tracking and baseline session/run key,
+baseline identities, identities added since baseline and emitted BOX IDs.
+MainWindow recovery/discovery paths call `reset_pc`, preserving party state and
+deliberate PC disconnect retention. Session/run changes rebaseline through the
+same payload keys; resolved-layout/acquisition readiness checks remain in
+MainWindow. Neither heartbeat nor C3 display health authorizes acquisition.
+Combined discovery/acquisition event wording, trace display watermark, health
+assembly and UI updates remain presentation responsibilities.
+
+`process` reuses existing reconciliation/observer functions in their established
+order. Its synchronous typed callback publishes notices/refreshes the view before
+party/BOX observation. The captured run remains fixed even if publication changes
+active selection. Observer failures propagate into the existing MainWindow OSError
+catch, preserving prior successful persistence/notices. PC baseline errors still
+propagate outside that catch. Confirmation, replacement/extra/review/ignore and
+automatic-record preferences stay with existing store/view/notification owners.
+No new confirmation or save operation was introduced.
+
+Removed MainWindow's ownership of two acquisition observers and five PC baseline
+fields, direct reconciliation calls and baseline/observer sequencing. Candidate
+preparation, validation gates, stable-box suppression telemetry, discovery dispatch,
+notification rendering and persistence error reporting remain in MainWindow.
+AST spans: MainWindow **4,691 → 4,613**; full poll **443 → 363** lines. Existing
+C1–C4 behavior and subsequent badge-readout changes were preserved.
+
+### Regression coverage and performance
+
+Five full-poll characterization cases preceded production changes; a sixth tests
+old-run notification confirmation safety after run switching. Fourteen independent
+coordinator cases use isolated real stores/providers without MainWindow,
+QApplication or an emulator. Coverage includes starter consumption, normal
+reconciliation/no-save duplicate polls, full-party BOX captures, party-to-PC dedup,
+repeated slot identities, unknown/occupied locations, party/BOX Shiny Clause dedup,
+invalid observations, disconnect retention, recovery/session reset, run switching
+during publication, no active run, publication ordering/failure and starter/baseline
+save rollback. Existing starter/acquisition/shiny/PC/diagnostic/snapshot tests remain;
+observer instrumentation now targets its new owner without changed expectations.
+
+The benchmark fixture adds warmed changed-identity pairs and acquisition/save
+counts. A locally captured pre-C5 source was loaded for the baseline run, followed
+by current implementation with identical fixtures and no concurrent test runs.
+Saved results: `benchmarks/results/acquisition-before.json` and `acquisition-after.json`.
+Five rounds each use 30 unchanged polls or 30 changed pairs (60 polls).
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| Unchanged full-poll median | 7.0783 ms | 7.1406 ms |
+| Unchanged round range | 6.9141–7.2737 ms | 6.9180–7.2407 ms |
+| Changed-identity pair median | 35.4777 ms | 36.9726 ms |
+| Changed-pair range | 34.6155–35.7863 ms | 33.8932–37.9667 ms |
+| Acquisition observer calls / 30 unchanged polls | 60 | 60 |
+| Starter / shiny reconciliation calls | 30 / 60 | 30 / 60 |
+| PC baseline calls / warmed polls | 0 | 0 |
+| Store save calls / warmed polls | 0 | 0 |
+
+The profiler's `reconcile_party_encounters` name count is 60 on both sides because
+it counts the domain function and its store method, not 60 domain reconciliations.
+Ranges overlap and medians increased slightly: no performance improvement is
+claimed. Changed pairs alternate already-observed six-member identities after
+warmup; they measure refresh/reconciliation, not cold capture save latency. Save
+behavior is covered separately. Ephemeral typed projections add no extra decoding,
+candidate projection, cache, timer or persistence operation.
+
+Verification: focused selection **251 passed in 44.11s**; independent selection
+**14 passed in 0.34s**; complete suite **920 passed in 170.03s**. Ruff and diff
+checks passed. `python -m build --no-isolation` successfully produced the sdist
+and wheel. New coverage totals 20 cases (14 independent, six UI integration).
+
+### Remaining boundaries and next slice
+
+PC discovery/session dispatch, acquisition readiness gates and advanced suppression
+logging remain in MainWindow, alongside polling/UI scheduling, C3 health assembly,
+notification rendering and walking acknowledgements. Reconciliation publication
+ordering is deliberately synchronous and must be preserved if future work defers
+UI updates. Protocol, persistence formats, game support, freshness/cache policy and
+backup/automation safety remain unchanged.
+
+Next: characterize PC resolver session/reset transitions and explicit acquisition
+readiness inputs separately from asynchronous discovery dispatch. This precedes
+a larger PC runtime controller more safely than extracting transport or the entire
+poll. Do not proceed automatically. Live PC discovery/reconnect and confirmation
+smoke checks remain manual; this pass uses deterministic snapshots and isolated
+stores. No user save data, commits or pushes were involved.

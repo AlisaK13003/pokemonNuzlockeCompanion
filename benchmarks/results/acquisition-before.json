@@ -1,0 +1,39 @@
+{
+  "unchanged_full_poll": {
+    "median_ms": 7.0783,
+    "round_ms": [
+      7.1388,
+      7.0783,
+      6.9141,
+      7.0063,
+      7.2737
+    ],
+    "iterations": 30,
+    "rounds": 5
+  },
+  "changed_identity_pair": {
+    "median_ms": 35.4777,
+    "round_ms": [
+      35.3869,
+      35.7863,
+      34.6155,
+      35.5281,
+      35.4777
+    ],
+    "iterations": 30,
+    "rounds": 5
+  },
+  "acquisition_calls_30_polls": {
+    "reconcile_initial_starter": 30,
+    "reconcile_party_encounters": 60,
+    "reconcile_shiny_encounters": 60,
+    "baseline_candidates": 0
+  },
+  "acquisition_observe_calls_30_polls": 60,
+  "store_save_calls_30_polls": 0,
+  "observer_calls_30_polls": {
+    "death_detection": 30,
+    "wipe_detection": 30,
+    "run_prompt": 30
+  }
+}

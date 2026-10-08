@@ -50,11 +50,10 @@ from pokemon_ev_tracker.core.friendship_training import (
     FriendshipGoal,
     FriendshipWalkSessionStats,
 )
-from pokemon_ev_tracker.core.nuzlocke.acquisition import (
-    PartyAcquisitionObserver,
-    reconcile_initial_starter,
-    reconcile_party_encounters,
-    reconcile_shiny_encounters,
+from pokemon_ev_tracker.core.nuzlocke.acquisition_coordinator import (
+    AcquisitionCoordinator,
+    AcquisitionObservation,
+    ReconciledEncounters,
 )
 from pokemon_ev_tracker.core.nuzlocke.models import PartyLevel
 from pokemon_ev_tracker.core.nuzlocke.party_lifecycle import PartyLifecycleCoordinator
@@ -242,13 +241,7 @@ class MainWindow(QMainWindow):
                       and self.provider.nuzlocke_profile is not None else ()),
             settings=settings,
         )
-        self._acquisition_observer = PartyAcquisitionObserver()
-        self._pc_acquisition_observer = PartyAcquisitionObserver(reset_on_disconnect=False)
-        self._pc_storage_tracking_active = False
-        self._pc_storage_baseline_key = None
-        self._pc_storage_baseline_ids: set[str] = set()
-        self._pc_storage_post_baseline_ids: set[str] = set()
-        self._pc_storage_emitted_box_ids: set[str] = set()
+        self.acquisitions = AcquisitionCoordinator(self.provider, self.nuzlocke_view.store)
         self._pc_resolver_lifecycle = "unresolved"
         self._pc_monitoring_ready = False
         self._pc_lua_run_id: str | None = None
@@ -1495,101 +1488,22 @@ class MainWindow(QMainWindow):
                         "already_observed": None,
                         "timestamp": time.monotonic(),
                     }
-        if pc_storage_acquisition_ready:
-            lua_run_id = (
-                pc_storage_payload.payload.get("run_id")
-                if pc_storage_payload is not None
-                else None
-            )
-            baseline_key = (
-                lua_run_id,
-                acquisition_run.run_id if acquisition_run else None,
-            )
-            if not self._pc_storage_tracking_active or baseline_key != self._pc_storage_baseline_key:
-                self._pc_acquisition_observer.baseline_candidates(
-                    boxed_acquisition_candidates,
-                    run=acquisition_run,
-                    store=self.nuzlocke_view.store,
-                )
-                self._pc_storage_baseline_ids = {
-                    candidate.stable_id for candidate in boxed_acquisition_candidates
-                }
-                self._pc_storage_post_baseline_ids.clear()
-                self._pc_storage_emitted_box_ids.clear()
-                self._pc_storage_tracking_active = True
-                self._pc_storage_baseline_key = baseline_key
-                LOGGER.debug(
-                    "PC baseline established: Lua run=%s Nuzlocke run=%s occupied=%s ids=%s",
-                    lua_run_id, baseline_key[1], len(self._pc_storage_baseline_ids),
-                    sorted(self._pc_storage_baseline_ids),
-                )
-                self._pc_last_event = (
-                    f"Baseline established with {len(self._pc_storage_baseline_ids)} Pokemon."
-                )
-            self._pc_storage_post_baseline_ids.update(
-                candidate.stable_id for candidate in boxed_acquisition_candidates
-                if candidate.stable_id not in self._pc_storage_baseline_ids
-            )
+        baseline_count = self.acquisitions.prepare_pc(
+            boxed_acquisition_candidates, ready=pc_storage_acquisition_ready,
+            session_id=pc_payload_data.get("run_id"), run=acquisition_run,
+        )
+        if baseline_count is not None:
+            self._pc_last_event = f"Baseline established with {baseline_count} Pokemon."
         new_acquisitions = ()
         try:
-            starter_records = reconcile_initial_starter(
-                party_acquisition_candidates, connected=snapshot.connected,
-                valid_snapshot=party_snapshot_valid, run=acquisition_run,
-                store=self.nuzlocke_view.store,
+            observed = self.acquisitions.process(
+                AcquisitionObservation(snapshot.connected, party_snapshot_valid,
+                    pc_storage_acquisition_ready, acquisition_run,
+                    party_acquisition_candidates, boxed_acquisition_candidates),
+                self._publish_reconciled_encounters,
             )
-            shinies = reconcile_shiny_encounters(
-                party_acquisition_candidates if party_snapshot_valid else (),
-                connected=snapshot.connected, valid_snapshot=party_snapshot_valid,
-                run=acquisition_run, store=self.nuzlocke_view.store,
-                classify=self.provider.classify_acquisition,
-            )
-            boxed_shinies = reconcile_shiny_encounters(
-                boxed_acquisition_candidates,
-                connected=snapshot.connected, valid_snapshot=pc_storage_acquisition_ready,
-                run=acquisition_run, store=self.nuzlocke_view.store,
-                classify=self.provider.classify_acquisition,
-            )
-            reconciled = starter_records + reconcile_party_encounters(
-                party_acquisition_candidates,
-                connected=snapshot.connected,
-                valid_snapshot=party_snapshot_valid,
-                run=acquisition_run,
-                store=self.nuzlocke_view.store,
-                classify=self.provider.classify_acquisition,
-            )
-            if self.settings.notify_encounters and acquisition_run is not None:
-                for record in reconciled:
-                    candidate = next((c for c in party_acquisition_candidates if c.stable_id == record.stable_id), None)
-                    if candidate is None or not candidate.is_shiny:
-                        recorded_encounter_notice(self, acquisition_run, record, candidate.species_id if candidate else None)
-                for shiny in (*shinies, *boxed_shinies):
-                    shiny_notice(self, acquisition_run, shiny)
-            if reconciled or shinies or boxed_shinies:
-                self.nuzlocke_view._refresh_all()
-            party_acquisitions = self._acquisition_observer.observe(
-                party_acquisition_candidates,
-                connected=snapshot.connected,
-                valid_snapshot=party_snapshot_valid,
-                run=acquisition_run,
-                store=self.nuzlocke_view.store,
-                classify=self.provider.classify_acquisition,
-                classify_first_party=lambda candidate, run: self.provider.classify_acquisition(
-                    candidate, run, first_party_member=True
-                ),
-            )
-            boxed_acquisitions = self._pc_acquisition_observer.observe(
-                boxed_acquisition_candidates,
-                connected=snapshot.connected,
-                valid_snapshot=pc_storage_acquisition_ready,
-                run=acquisition_run,
-                store=self.nuzlocke_view.store,
-                classify=self.provider.classify_acquisition,
-            )
-            new_acquisitions = (*party_acquisitions, *boxed_acquisitions)
-            self._pc_storage_emitted_box_ids.update(
-                event.stable_id for event in boxed_acquisitions
-            )
-            for event in boxed_acquisitions:
+            new_acquisitions = (*observed.party, *observed.boxed)
+            for event in observed.boxed:
                 source_candidate = next(
                     (item for item in boxed_acquisition_candidates
                      if item.stable_id == event.stable_id), None
@@ -1615,8 +1529,8 @@ class MainWindow(QMainWindow):
         acquisition_trace = max(
             (
                 trace for trace in (
-                    self._acquisition_observer.last_decision,
-                    self._pc_acquisition_observer.last_decision,
+                    self.acquisitions.party_decision,
+                    self.acquisitions.pc_decision,
                     pc_pre_observer_trace,
                 ) if trace is not None
             ),
@@ -1633,8 +1547,7 @@ class MainWindow(QMainWindow):
             pc_storage_acquisition_ready
             and pc_payload_data.get("pc_storage_resolver_kind") == "session_pc_cache"
             and acquisition_run is not None
-            and self._pc_storage_tracking_active
-            and self._pc_storage_baseline_key == (
+            and self.acquisitions.pc_baseline_matches(
                 pc_payload_data.get("lua_run_id") or pc_payload_data.get("run_id"),
                 acquisition_run.run_id,
             )
@@ -1665,7 +1578,7 @@ class MainWindow(QMainWindow):
         elif cache_progress_status == "failed" and discovery_status != "cache-confirmation-failed":
             self._pc_resolver_lifecycle = "discovery-failed"
         elif pc_payload_data.get("pc_storage_resolver_status") == "stale" or (
-            self._pc_storage_tracking_active and not pc_storage_ready
+            self.acquisitions.pc_tracking and not pc_storage_ready
         ):
             self._pc_resolver_lifecycle = "stale"
         elif discovery_status in {"stale", "cache-confirmation-failed"}:
@@ -1686,13 +1599,13 @@ class MainWindow(QMainWindow):
                 pc_storage_state, pc_storage_payload, pc_storage_fresh,
                 boxed_pokemon, pc_storage_changes, pc_storage_discovery_payload,
                 pc_storage_discovery_progress, pc_storage_monitor_debug,
-                pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
+                pc_pre_observer_trace or self.acquisitions.pc_decision,
             )
             pc_health = self._refresh_pc_storage_compact_status(
                 snapshot.connected, pc_storage_state, pc_payload_data,
                 pc_storage_discovery_payload, pc_storage_discovery_progress,
                 pc_storage_monitor_debug,
-                pc_pre_observer_trace or self._pc_acquisition_observer.last_decision,
+                pc_pre_observer_trace or self.acquisitions.pc_decision,
             )
         stale_after = getattr(
             getattr(self.ram_data_source, "server", None), "stale_after_seconds", 5.0
@@ -1770,6 +1683,19 @@ class MainWindow(QMainWindow):
         refresh_event_notices(self)
         if snapshot.connected:
             self._record_ev_changes(party_state)
+
+    def _publish_reconciled_encounters(self, result: ReconciledEncounters) -> None:
+        run = result.run
+        reconciled, shinies, boxed_shinies = result.encounters, result.party_shinies, result.boxed_shinies
+        if self.settings.notify_encounters and run is not None:
+            for record in reconciled:
+                candidate = next((c for c in result.party if c.stable_id == record.stable_id), None)
+                if candidate is None or not candidate.is_shiny:
+                    recorded_encounter_notice(self, run, record, candidate.species_id if candidate else None)
+            for shiny in (*shinies, *boxed_shinies):
+                shiny_notice(self, run, shiny)
+        if reconciled or shinies or boxed_shinies:
+            self.nuzlocke_view._refresh_all()
 
     def _refresh_tracker_party(self, connected: bool, party_state, *, refresh_recommendations=True) -> None:
         self._training_party_connected = connected
@@ -3125,13 +3051,8 @@ class MainWindow(QMainWindow):
         self.pc_storage_discovery_cancel_button.setEnabled(True)
 
     def _reset_pc_baseline(self) -> None:
-        self._pc_storage_tracking_active = False
-        self._pc_storage_baseline_key = None
-        self._pc_storage_baseline_ids.clear()
-        self._pc_storage_post_baseline_ids.clear()
-        self._pc_storage_emitted_box_ids.clear()
+        self.acquisitions.reset_pc()
         self._pc_monitoring_ready = False
-        self._pc_acquisition_observer = PartyAcquisitionObserver(reset_on_disconnect=False)
 
     def _maybe_auto_discover_pc_layout(
         self, connected: bool, lua_run_id, pc_payload: dict, progress: dict,
@@ -3298,12 +3219,12 @@ class MainWindow(QMainWindow):
             f"  Lua build: {pc_payload.get('lua_build_id', '--')}\n"
             f"  First BoxPokemon: {pc_payload.get('session_pc_first_record_address') or discovery.get('session_pc_first_record_address') or '--'}\n"
             f"  State: {self._pc_resolver_lifecycle}; cache validation: {cache_install.get('lua_validation', '--')}\n"
-            f"  Baseline: {len(self._pc_storage_baseline_ids) if self._pc_storage_tracking_active else '--'}; "
+            f"  Baseline: {self.acquisitions.pc_baseline_count if self.acquisitions.pc_tracking else '--'}; "
             f"current occupied: {len(state.valid_pokemon) if state and state.available else '--'}\n"
             "Acquisition\n"
             f"  Last PC event: {self._pc_last_event}\n"
             f"  Pending stability: {len(monitor.get('pending_stability', ()))}; "
-            f"BOX candidates emitted: {len(self._pc_storage_emitted_box_ids)}\n"
+            f"BOX candidates emitted: {self.acquisitions.pc_emitted_count}\n"
             f"  Observer: {trace.get('status', '--')}; suppression: {trace.get('reason') or '--'}\n"
             "Discovery Anchor\n"
             f"  Box 1 Slot 1: {expected_nickname} / {expected_name}"
@@ -3608,7 +3529,7 @@ class MainWindow(QMainWindow):
         )
         self.pc_storage_baseline_count_label.setText(
             "Baseline occupied Pokemon: "
-            f"{len(self._pc_storage_baseline_ids) if self._pc_storage_tracking_active else '--'}"
+            f"{self.acquisitions.pc_baseline_count if self.acquisitions.pc_tracking else '--'}"
         )
         self.pc_storage_monitoring_label.setText(
             "Monitoring for new boxed Pokemon: "
@@ -3813,11 +3734,11 @@ class MainWindow(QMainWindow):
             f"Bytes received: {received_bytes:,}",
             f"Valid records: {len(state.valid_pokemon) if state else 0}",
             f"Stable identities: {len(stable_pokemon)}",
-            f"Baseline identity count: {len(self._pc_storage_baseline_ids) if self._pc_storage_tracking_active else '--'}",
+            f"Baseline identity count: {self.acquisitions.pc_baseline_count if self.acquisitions.pc_tracking else '--'}",
             f"Current identity count: {len(state.valid_pokemon) if state and state.available else '--'}",
-            f"Additions since baseline: {len(self._pc_storage_post_baseline_ids)}",
+            f"Additions since baseline: {self.acquisitions.pc_addition_count}",
             f"Pending stability candidates: {len(monitor_debug.get('pending_stability', ())) if isinstance(monitor_debug, dict) else 0}",
-            f"Emitted BOX candidates: {len(self._pc_storage_emitted_box_ids)}",
+            f"Emitted BOX candidates: {self.acquisitions.pc_emitted_count}",
             f"Monitoring armed: {str(self._pc_monitoring_ready).lower()}",
             f"Empty records: {state.empty_records if state else '--'}",
             f"Checksum failures: {state.checksum_failures if state else 0}",

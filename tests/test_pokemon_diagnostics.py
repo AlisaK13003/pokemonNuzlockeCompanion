@@ -43,10 +43,8 @@ class DiagnosticHarness:
         self.provider = default_game_provider()
         self.ram_party_summary_label = TextSink()
         self._pc_resolver_lifecycle = "UNRESOLVED"
-        self._pc_storage_baseline_ids = set()
-        self._pc_storage_post_baseline_ids = set()
-        self._pc_storage_emitted_box_ids = set()
-        self._pc_storage_tracking_active = False
+        self.acquisitions = SimpleNamespace(
+            pc_baseline_count=0, pc_addition_count=0, pc_emitted_count=0, pc_tracking=False)
         self._pc_monitoring_ready = False
         self.observed = False
         self.nuzlocke_view = SimpleNamespace(store=SimpleNamespace(

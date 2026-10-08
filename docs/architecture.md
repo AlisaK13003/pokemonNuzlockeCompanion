@@ -94,6 +94,16 @@ an accepted wipe. Dialogs, persistence, notification presentation, acquisition
 reconciliation and scheduling remain with their existing owners. Shared unchanged
 raw validation/frame contracts live in `core/nuzlocke/party_snapshot.py`.
 
+`core/nuzlocke/acquisition_coordinator.py` owns party/PC acquisition observers and
+the PC baseline key and identity sets. MainWindow retains raw/session validation
+gates and provider candidate projection, then calls `prepare_pc` and `process`
+with an immutable `AcquisitionObservation`. Existing core reconciliations and
+NuzlockeStore own deduplication, starter/Shiny Clause rules and persistence policy.
+A typed reconciliation callback publishes UI notices before observation continues.
+Confirmation actions and discovery dispatch remain in the UI layer. Coordinator
+queries expose counts/readiness and existing observer decisions without copying
+or moving authoritative run data.
+
 See [the first engineering audit and measurements](refactor-roadmap.md) for the
 baseline, bounded initial implementation, regression gates and later phases.
 

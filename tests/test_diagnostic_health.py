@@ -294,8 +294,8 @@ def test_ui_label_text_and_enabled_state_are_not_health_authority(health_window,
         "isEnabled",
         Mock(side_effect=AssertionError("widget state readback")),
     )
-    acquire = Mock(wraps=window._acquisition_observer.observe)
-    window._acquisition_observer.observe = acquire
+    acquire = Mock(wraps=window.acquisitions._party.observe)
+    window.acquisitions._party.observe = acquire
     window._refresh_ram_backend_debug()
     assert acquire.call_count == 1
     assert window.diagnostics_view.fields["pc"].value.text() == "Connecting"

@@ -284,10 +284,10 @@ def test_ui_observers_keep_polling_raw_inputs_and_mutable_run_state(live, snapsh
     run.starter_observation_complete = True
     hp = Mock(wraps=window.party_lifecycle._hp.observe)
     wipe = Mock(wraps=window.party_lifecycle._wipe.observe)
-    acquisitions = Mock(wraps=window._acquisition_observer.observe)
+    acquisitions = Mock(wraps=window.acquisitions._party.observe)
     window.party_lifecycle._hp.observe = hp
     window.party_lifecycle._wipe.observe = wipe
-    window._acquisition_observer.observe = acquisitions
+    window.acquisitions._party.observe = acquisitions
     try:
         window._refresh_ram_backend_debug()
         server.sample.payload["friendship_walk_ack_sequence"] = 9

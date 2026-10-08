@@ -154,7 +154,7 @@ def test_auto_wipe_offers_next_run_and_rebaselines_existing_party(window, monkey
     assert new.name == "Platinum Run 05"
     party = (AcquisitionCandidate(
         "stable", 403, "Shinx", "Sparky", 12, 4, 1, "Route 202", 0, 12, False),)
-    assert window._acquisition_observer.observe(
+    assert window.acquisitions._party.observe(
         party, connected=True, valid_snapshot=True, run=new, store=store,
         classify=lambda _candidate, _run: ("WILD", "HIGH", None)) == ()
     hp = (PartyHpSample("stable", "Shinx", "Sparky", 12, 0, 1, "Route 202"),)

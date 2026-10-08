@@ -2,6 +2,7 @@
 
 import argparse
 import cProfile
+import importlib.util
 import json
 import os
 import sys
@@ -30,7 +31,14 @@ from pokemon_ev_tracker.ui.main_window import MainWindow
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--window-source", type=Path)
     args = parser.parse_args()
+    window_type = MainWindow
+    if args.window_source:
+        spec = importlib.util.spec_from_file_location("baseline_window", args.window_source)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        window_type = module.MainWindow
     app = QApplication.instance() or QApplication([])
     root = ROOT / ".test-scratch" / f"c4-benchmark-{uuid4().hex}"
     root.mkdir(parents=True)
@@ -47,7 +55,7 @@ def main():
 
     source.snapshot = snapshot
     with patch.object(AppSettings, "save_default"), patch.object(SaveBackupService, "start"):
-        window = MainWindow(
+        window = window_type(
             AppSettings(prompt_for_nuzlocke_run=False, auto_pc_rediscovery=False,
                         notify_encounters=False), data_source=source,
             nuzlocke_store=NuzlockeStore(root / "runs.json"),
@@ -56,11 +64,32 @@ def main():
         window.nuzlocke_view.store.create_run("benchmark", PLATINUM_NUZLOCKE_PROFILE).starter_observation_complete = True
         try:
             result = {"unchanged_full_poll": measure(window._refresh_ram_backend_debug)}
+            original_party = source.party
+            changed_party = _party(*tuple((index + 10, species) for index, species in enumerate((391, 388, 397, 404, 418, 93))))
+            def changed_pair():
+                source.party = changed_party
+                window._refresh_ram_backend_debug()
+                source.party = original_party
+                window._refresh_ram_backend_debug()
+            result["changed_identity_pair"] = measure(changed_pair)
             profile = cProfile.Profile()
             profile.enable()
             for _ in range(30):
                 window._refresh_ram_backend_debug()
             profile.disable()
+            result["acquisition_calls_30_polls"] = {
+                name: sum(entry.callcount for entry in profile.getstats()
+                          if hasattr(entry.code, "co_name") and entry.code.co_name == name)
+                for name in ("reconcile_initial_starter", "reconcile_party_encounters",
+                             "reconcile_shiny_encounters", "baseline_candidates")}
+            result["acquisition_observe_calls_30_polls"] = sum(
+                entry.callcount for entry in profile.getstats()
+                if hasattr(entry.code, "co_name") and entry.code.co_name == "observe"
+                and Path(entry.code.co_filename).stem == "acquisition")
+            result["store_save_calls_30_polls"] = sum(
+                entry.callcount for entry in profile.getstats()
+                if hasattr(entry.code, "co_name") and entry.code.co_name == "save"
+                and Path(entry.code.co_filename).stem == "storage")
             result["observer_calls_30_polls"] = {
                 name: sum(entry.callcount for entry in profile.getstats()
                           if hasattr(entry.code, "co_name") and entry.code.co_name == "observe"
