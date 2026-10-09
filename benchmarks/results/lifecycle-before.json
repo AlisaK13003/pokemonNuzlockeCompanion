@@ -1,0 +1,11 @@
+{
+  "tcp_shutdown_median_ms": 0.0164,
+  "tcp_shutdown_max_ms": 0.0696,
+  "tcp_readers_alive_at_stop_return": 20,
+  "tcp_cycles": 20,
+  "controlled_cycle_shutdown_median_ms": 0.0098,
+  "restart_cycles": 50,
+  "retained_bytes_after_cycles": 9232,
+  "peak_bytes": 14864,
+  "owned_threads_after_cleanup": null
+}

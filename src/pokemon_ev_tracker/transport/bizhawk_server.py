@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import heapq
 import json
@@ -10,6 +11,7 @@ import os
 import queue
 import re
 import secrets
+import select
 import socket
 import tempfile
 import threading
@@ -69,6 +71,7 @@ PC_SAVE_FILE_MINIMUM_BYTES = max(
 PC_SRAM_SEARCH_CHUNK_MAX = 0x1000
 PC_SRAM_SEARCH_MAX_BYTES = 0x1000000
 PC_SRAM_SEARCH_TIMEOUT_SECONDS = 45.0
+SHUTDOWN_JOIN_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,14 @@ class BizHawkDebugServer:
         self.coordinate_file = self.fallback_file.with_name("ev_tracker_bizhawk_coordinates.jsonl")
         self.stale_after_seconds = stale_after_seconds
         self._stop_event = threading.Event()
+        self._lifecycle_lock = threading.Lock()
+        self._owned_threads: set[threading.Thread] = set()
+        self._analysis_in_flight: set[int] = set()
+        self._clients: set[socket.socket] = set()
+        self._running = False
+        self._starting = False
+        self._stopping = False
+        self._has_started = False
         self._lock = threading.Lock()
         self._command_file_lock = threading.Lock()
         self._command_file_queue: deque[str] = deque()
@@ -168,66 +179,206 @@ class BizHawkDebugServer:
         self._coordinate_file_capture_id: str | None = None
         self._coordinate_file_position = 0
 
+    def _launch_owned_thread(
+        self, target, *, name: str, args: tuple = (),
+    ) -> threading.Thread | None:
+        analysis_id = id(args[0]) if name == "pc-storage-discovery-analysis" else None
+        def run() -> None:
+            try:
+                target(*args)
+            except Exception:
+                LOGGER.exception("BizHawk background worker failed: %s", name)
+            finally:
+                with self._lifecycle_lock:
+                    self._owned_threads.discard(threading.current_thread())
+                    if analysis_id is not None:
+                        self._analysis_in_flight.discard(analysis_id)
+                    if threading.current_thread() in self._client_threads:
+                        self._client_threads.remove(threading.current_thread())
+
+        with self._lifecycle_lock:
+            if self._stop_event.is_set():
+                return None
+            if analysis_id is not None and analysis_id in self._analysis_in_flight:
+                return None
+            thread = threading.Thread(target=run, name=name, daemon=True)
+            self._owned_threads.add(thread)
+            if analysis_id is not None:
+                self._analysis_in_flight.add(analysis_id)
+            if name == "bizhawk-ram-client":
+                self._client_threads.append(thread)
+            try:
+                thread.start()
+            except Exception:
+                self._owned_threads.discard(thread)
+                if analysis_id is not None:
+                    self._analysis_in_flight.discard(analysis_id)
+                if thread in self._client_threads:
+                    self._client_threads.remove(thread)
+                raise
+            return thread
+
     def start(self) -> None:
-        if self._tcp_thread is not None and self._tcp_thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._tcp_thread = threading.Thread(
-            target=self._serve_tcp,
-            name="bizhawk-ram-tcp-server",
-            daemon=True,
-        )
-        self._file_thread = threading.Thread(
-            target=self._poll_fallback_file,
-            name="bizhawk-ram-file-poller",
-            daemon=True,
-        )
-        self._tcp_thread.start()
-        self._file_thread.start()
+        with self._lifecycle_lock:
+            if self._running or self._starting:
+                return
+            if self._stopping or any(thread.is_alive() for thread in self._owned_threads):
+                raise RuntimeError("BizHawk transport workers are still stopping; retry after they exit.")
+            self._starting = True
+            reset = self._has_started or self._stop_event.is_set()
+            self._stop_event = threading.Event()
+        try:
+            if reset:
+                self._reset_runtime_state()
+            self._tcp_thread = self._launch_owned_thread(
+                self._serve_tcp, name="bizhawk-ram-tcp-server",
+            )
+            self._file_thread = self._launch_owned_thread(
+                self._poll_fallback_file, name="bizhawk-ram-file-poller",
+            )
+            with self._lifecycle_lock:
+                self._running = not self._stop_event.is_set()
+                self._has_started = True
+        except Exception:
+            self.stop()
+            raise
+        finally:
+            with self._lifecycle_lock:
+                self._starting = False
+
+    @staticmethod
+    def _close_socket(sock: socket.socket) -> None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     def stop(self) -> None:
-        self._stop_event.set()
-        with self._client_lock:
-            client = self._active_client
-            self._active_client = None
-        if client is not None:
-            try:
-                client.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                client.close()
-            except OSError:
-                pass
-        if self._server_socket is not None:
-            try:
-                self._server_socket.close()
-            except OSError:
-                pass
+        deadline = time.monotonic() + SHUTDOWN_JOIN_TIMEOUT_SECONDS
+        with self._lifecycle_lock:
+            if self._stopping:
+                return
+            self._stopping = True
+            self._running = False
+            self._stop_event.set()
+            threads = tuple(self._owned_threads)
+            sockets = set(self._clients)
+            listener = self._server_socket
+        try:
+            # Close before taking the send lock: shutdown wakes a blocked send/read.
+            active = self._active_client
+            if active is not None:
+                sockets.add(active)
+            if listener is not None:
+                sockets.add(listener)
+            for sock in sockets:
+                self._close_socket(sock)
+            with self._lifecycle_lock:
+                self._clients.difference_update(sockets)
+            self._preserve_pending_walk_stop()
+            if self._client_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                try:
+                    self._active_client = None
+                finally:
+                    self._client_lock.release()
+            else:
+                LOGGER.warning("BizHawk client cleanup is still finishing after shutdown.")
+            # Never join while holding a lifecycle, discovery, IO or publication lock.
+            for thread in threads:
+                if thread is not threading.current_thread():
+                    thread.join(max(0.0, deadline - time.monotonic()))
+            self._preserve_pending_walk_stop()
+            remaining = [thread.name for thread in threads if thread.is_alive()]
+            if remaining:
+                LOGGER.warning("BizHawk shutdown deadline reached; restart waits for workers: %s", remaining)
+            elif not self._starting:
+                self._reset_runtime_state()
+        finally:
+            with self._lifecycle_lock:
+                self._stopping = False
+
+    def _preserve_pending_walk_stop(self) -> None:
+        # UI already requests input release before transport.stop. Persist the
+        # newest queued STOP rather than abandon it behind a pending file command.
+        if not self._command_file_lock.acquire(blocking=False):
+            LOGGER.warning("Pending BizHawk STOP cleanup could not acquire the command lock; queue retained.")
+            return
+        try:
+            stops = [command for command in self._command_file_queue
+                     if re.fullmatch(r"WALK\|\d+\|STOP\n", command)]
+            if stops:
+                if self._publish_command_file_locked(stops[-1]):
+                    self._command_file_queue.clear()
+                else:
+                    LOGGER.error("Could not preserve queued WALK STOP during shutdown; queue retained.")
+        finally:
+            self._command_file_lock.release()
+
+    def _reset_runtime_state(self) -> None:
+        # Called only once all retired owned workers are quiescent. Locks are
+        # acquired separately, never while holding the lifecycle lock.
+        with self._lock:
+            self._heartbeat = self._party_payload = self._pc_storage_payload = None
+            self._pc_storage_discovery_payload = self._pc_save_offset_test_payload = None
+            self._pc_sram_search_payload = None
+        with self._pc_discovery_lock:
+            self._pc_discovery_scan = self._pc_pokemon_search = None
+            self._pc_structure_pointer_search = self._pc_cache_install = None
+            self._pc_inspection_baseline = None
+            self._pc_discovery_progress = {"status": "idle"}
+            self._inactive_pc_discovery_notices.clear()
+        with self._pc_save_test_lock:
+            self._pc_save_offset_test_active = None
+            self._pc_save_offset_test_baseline.clear()
+            self._pc_save_offset_test_baseline_run_id = None
+            self._pc_save_offset_test_capture_count = 0
+            self._pc_save_offset_test_status = {"status": "idle"}
+            self._pc_save_offset_test_before_files.clear()
+            self._pc_save_offset_test_expected_identity = None
+            self._pc_save_offset_test_image_baseline.clear()
+        with self._pc_sram_search_lock:
+            self._pc_sram_search_pending = self._pc_sram_search_active = None
+            self._pc_sram_search_baselines.clear()
+            self._pc_sram_search_status = {"status": "idle"}
+        with self._command_file_lock:
+            self._command_file_queue = deque(
+                command for command in self._command_file_queue
+                if re.fullmatch(r"WALK\|\d+\|STOP\n", command)
+            )
+        with self._coordinate_file_lock:
+            self._coordinate_file_capture_id = None
+            self._coordinate_file_position = 0
+        self.drain_coordinate_events(2048)
+        self._file_position = self._file_size_seen = None
+        self._last_fallback_reset_notice = None
 
     def latest_heartbeat(self) -> BizHawkHeartbeat | None:
         with self._lock:
-            return self._heartbeat
+            return None if self._stop_event.is_set() else self._heartbeat
 
     def latest_party_payload(self) -> BizHawkHeartbeat | None:
         with self._lock:
-            return self._party_payload
+            return None if self._stop_event.is_set() else self._party_payload
 
     def latest_pc_storage_payload(self) -> BizHawkHeartbeat | None:
         with self._lock:
-            return self._pc_storage_payload
+            return None if self._stop_event.is_set() else self._pc_storage_payload
 
     def latest_pc_storage_discovery_payload(self) -> BizHawkHeartbeat | None:
         with self._lock:
-            return self._pc_storage_discovery_payload
+            return None if self._stop_event.is_set() else self._pc_storage_discovery_payload
 
     def latest_pc_save_offset_test_payload(self) -> BizHawkHeartbeat | None:
         with self._lock:
-            return self._pc_save_offset_test_payload
+            return None if self._stop_event.is_set() else self._pc_save_offset_test_payload
 
     def latest_pc_sram_search_payload(self) -> BizHawkHeartbeat | None:
         with self._lock:
-            return self._pc_sram_search_payload
+            return None if self._stop_event.is_set() else self._pc_sram_search_payload
 
     def pc_sram_search_status(self) -> dict[str, Any]:
         with self._pc_sram_search_lock:
@@ -238,6 +389,8 @@ class BizHawkDebugServer:
             return dict(self._pc_save_offset_test_status)
 
     def pc_storage_discovery_progress(self) -> dict[str, Any]:
+        if self._stop_event.is_set():
+            return {"status": "idle"}
         with self._pc_discovery_lock:
             pointer_search = self._pc_structure_pointer_search
             if pointer_search is not None:
@@ -396,6 +549,8 @@ class BizHawkDebugServer:
 
     def _send_tcp_command(self, command: str) -> bool:
         with self._client_lock:
+            if self._stop_event.is_set():
+                return False
             client = self._active_client
             if client is None:
                 return False
@@ -408,6 +563,13 @@ class BizHawkDebugServer:
 
     def _write_command_file(self, command: str) -> bool:
         with self._command_file_lock:
+            if self._stop_event.is_set():
+                if not re.fullmatch(r"WALK\|\d+\|STOP\n", command):
+                    return False
+                if self._publish_command_file_locked(command):
+                    self._command_file_queue.clear()
+                    return True
+                return False
             if self.command_file.exists():
                 self._command_file_queue.append(command)
                 LOGGER.info(
@@ -434,6 +596,8 @@ class BizHawkDebugServer:
     def _flush_command_file_queue(self) -> None:
         published = None
         with self._command_file_lock:
+            if self._stop_event.is_set():
+                return
             if not self._command_file_queue or self.command_file.exists():
                 return
             command = self._command_file_queue.popleft()
@@ -1200,68 +1364,107 @@ class BizHawkDebugServer:
         return time.monotonic() - heartbeat.received_at <= self.stale_after_seconds
 
     def _serve_tcp(self) -> None:
+        stop_event = self._stop_event
+        server = None
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-                self._server_socket = server
+                with self._lifecycle_lock:
+                    if stop_event.is_set():
+                        return
+                    self._server_socket = server
                 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 server.bind((self.host, self.port))
                 server.listen(1)
                 server.settimeout(0.5)
                 LOGGER.info("BizHawk RAM server listening on %s:%s", self.host, self.port)
-                while not self._stop_event.is_set():
+                while not stop_event.is_set():
                     try:
                         client, address = server.accept()
                     except TimeoutError:
                         continue
                     except OSError:
                         break
-                    thread = threading.Thread(
-                        target=self._handle_client,
-                        args=(client, address),
-                        name="bizhawk-ram-client",
-                        daemon=True,
-                    )
-                    self._client_threads.append(thread)
-                    thread.start()
+                    with self._lifecycle_lock:
+                        self._clients.add(client)
+                    try:
+                        worker = self._launch_owned_thread(
+                            self._handle_client, args=(client, address), name="bizhawk-ram-client",
+                        )
+                    except Exception:
+                        self._close_socket(client)
+                        with self._lifecycle_lock:
+                            self._clients.discard(client)
+                        raise
+                    if worker is None:
+                        self._close_socket(client)
+                        with self._lifecycle_lock:
+                            self._clients.discard(client)
         except OSError:
-            LOGGER.exception("BizHawk RAM TCP server failed.")
+            if not stop_event.is_set():
+                LOGGER.exception("BizHawk RAM TCP server failed.")
         finally:
-            self._server_socket = None
+            with self._lifecycle_lock:
+                if self._server_socket is server:
+                    self._server_socket = None
 
     def _handle_client(self, client: socket.socket, address: tuple[str, int]) -> None:
-        LOGGER.info("BizHawk RAM Lua client connected from %s:%s", *address)
-        with self._client_lock:
-            previous = self._active_client
-            self._active_client = client
-        if previous is not None and previous is not client:
-            try:
-                previous.close()
-            except OSError:
-                pass
-        with client:
-            file = client.makefile("r", encoding="utf-8", newline="\n")
-            while not self._stop_event.is_set():
+        stop_event = self._stop_event
+        with self._lifecycle_lock:
+            self._clients.add(client)
+        try:
+            LOGGER.info("BizHawk RAM Lua client connected from %s:%s", *address)
+            with self._client_lock:
+                if stop_event.is_set():
+                    return
+                previous = self._active_client
+                self._active_client = client
+            if previous is not None and previous is not client:
+                self._close_socket(previous)
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            pending = ""
+            while not stop_event.is_set():
                 try:
-                    line = file.readline()
-                except OSError:
+                    readable, _, _ = select.select([client], [], [], 0.1)
+                    if not readable:
+                        continue
+                    chunk = client.recv(65536)
+                except (OSError, ValueError):
                     break
-                if not line:
+                if stop_event.is_set():
                     break
-                self._record_line(line, "tcp")
-        with self._client_lock:
-            if self._active_client is client:
-                self._active_client = None
+                pending += decoder.decode(chunk, final=not chunk)
+                while "\n" in pending:
+                    line, pending = pending.split("\n", 1)
+                    if stop_event.is_set():
+                        break
+                    self._record_line(line + "\n", "tcp")
+                if not chunk:
+                    # Preserve readline's final unterminated-line behavior at EOF.
+                    if pending and not stop_event.is_set():
+                        self._record_line(pending, "tcp")
+                    break
+        finally:
+            self._close_socket(client)
+            with self._client_lock:
+                if self._active_client is client:
+                    self._active_client = None
+            with self._lifecycle_lock:
+                self._clients.discard(client)
 
     def _poll_fallback_file(self) -> None:
-        while not self._stop_event.wait(0.1):
+        stop_event = self._stop_event
+        callbacks = (
+            lambda: self._poll_log_file(self.fallback_file), self._poll_coordinate_file,
+            self._flush_command_file_queue, self._check_pc_discovery_retry_timeout,
+            self._check_pc_cache_confirmation_timeout, self._check_pc_save_offset_test_timeout,
+            self._check_pc_sram_search_timeout,
+        )
+        while not stop_event.wait(0.1):
             try:
-                self._poll_log_file(self.fallback_file)
-                self._poll_coordinate_file()
-                self._flush_command_file_queue()
-                self._check_pc_discovery_retry_timeout()
-                self._check_pc_cache_confirmation_timeout()
-                self._check_pc_save_offset_test_timeout()
-                self._check_pc_sram_search_timeout()
+                for callback in callbacks:
+                    if stop_event.is_set():
+                        return
+                    callback()
             except OSError:
                 LOGGER.exception("Could not poll BizHawk fallback file.")
 
@@ -1458,6 +1661,8 @@ class BizHawkDebugServer:
                     self._coordinate_file_capture_id = None
 
     def _record_line(self, line: str, source: str) -> None:
+        if self._stop_event.is_set():
+            return
         parsed = parse_protocol_line(line)
         if parsed.route is MessageRoute.EMPTY:
             return
@@ -1605,6 +1810,8 @@ class BizHawkDebugServer:
             self._record_pc_structure_pointer_search_event(payload, source)
             return
         with self._lock:
+            if self._stop_event.is_set():
+                return
             received = BizHawkHeartbeat(
                 received_at=time.monotonic(),
                 payload=payload,
@@ -2030,6 +2237,8 @@ class BizHawkDebugServer:
             bytes_received=len(line.encode("utf-8")),
         )
         with self._lock:
+            if self._stop_event.is_set():
+                return
             self._pc_sram_search_payload = received
 
     def _record_pc_save_offset_test_event(
@@ -3073,6 +3282,8 @@ class BizHawkDebugServer:
             bytes_received=len(line.encode("utf-8")),
         )
         with self._lock:
+            if self._stop_event.is_set():
+                return
             self._pc_save_offset_test_payload = received
 
     @staticmethod
@@ -3266,13 +3477,10 @@ class BizHawkDebugServer:
             "progress_percent": 100,
             "current_address": f"0x{accumulator.start_address + accumulator.total_bytes:08X}",
         }
-        thread = threading.Thread(
-            target=self._finalize_pc_discovery,
-            args=(accumulator, source, frame),
+        self._launch_owned_thread(
+            self._finalize_pc_discovery, args=(accumulator, source, frame),
             name="pc-storage-discovery-analysis",
-            daemon=True,
         )
-        thread.start()
 
     def _try_finish_pc_discovery_locked(
         self,
@@ -3864,7 +4072,7 @@ class BizHawkDebugServer:
             status = "failed"
             error = str(exc)
         with self._pc_discovery_lock:
-            if self._pc_discovery_scan is not accumulator:
+            if self._stop_event.is_set() or self._pc_discovery_scan is not accumulator:
                 LOGGER.info(
                     "Discarding superseded PC discovery analysis: id=%s",
                     accumulator.scan_id,
@@ -5039,4 +5247,6 @@ class BizHawkDebugServer:
             bytes_received=len(line.encode("utf-8")),
         )
         with self._lock:
+            if self._stop_event.is_set():
+                return
             self._pc_storage_discovery_payload = received

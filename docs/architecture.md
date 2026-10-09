@@ -124,6 +124,20 @@ snapshots or RAM buffers. Server retains active-scan lifecycle, protocol validat
 result publication, analysis-worker scheduling and confirmed session-cache handoff.
 Cancellation/replacement discards the old scan and recovery together.
 
+BizHawkDebugServer owns a bounded-shutdown lifecycle for its existing listener,
+file poller, client receivers and discovery analysis workers. A lifecycle lock
+serializes reservations/tracking; each loop captures its stop event. Start is
+idempotent even if one receiver has failed. Stop signals cancellation, closes all
+accepted sockets, preserves queued WALK STOP, then joins against one shared
+one-second deadline outside locks. A timed-out worker remains owned; restart is
+rejected until it exits, avoiding overlap or stale generation publication. Snapshot
+and command paths gate stopped work, and restart clears transient session/ACK/
+discovery observations. Walk command sequence remains monotonic. TCP receives use
+100ms readiness waits and incremental UTF-8 decoding because Windows socket-backed
+readline may not wake on shutdown. Ordered NDJSON and final EOF fragments retain
+their existing semantics. No extra worker type, Lua command or input-release ACK
+is introduced; the UI still requests walking stop before transport shutdown.
+
 See [the first engineering audit and measurements](refactor-roadmap.md) for the
 baseline, bounded initial implementation, regression gates and later phases.
 

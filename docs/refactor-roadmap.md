@@ -1307,3 +1307,166 @@ Live emulator discovery/reconnect/cache smoke testing remains manual; this phase
 uses deterministic traces and existing automated safeguards. UI, protocol/Lua,
 provider contracts, persistence, freshness/acquisition coordination and independent
 backup scheduling are unchanged.
+
+
+## Phase D3 lifecycle audit (before implementation)
+
+D3 explicitly supersedes D2's proposed announcement-validation slice. Only TCP
+listener/file-poller references and an ever-growing client-thread list are tracked.
+Analysis daemon threads are not retained. Start checks only listener liveness and
+clears a shared event; a failed listener with a live poller permits duplicate file
+loops. Stop signals/ closes the active client and listener but neither joins nor
+closes all accepted clients. Text socket makefiles are not explicitly closed;
+closing a replaced socket alone may leave readline blocked. Unexpected non-OS
+worker exceptions escape; analysis catches decoding exceptions but errors during
+publication/cache handoff can escape. Discovery identity guards superseded scans,
+but stop does not invalidate ongoing work or reset runtime snapshots/ACK state.
+
+Existing locks: snapshot `_lock`, `_client_lock` for active-client command sends,
+`_command_file_lock` for atomic file publication/queue, `_pc_discovery_lock` for
+scans/cache state, separate save/SRAM and coordinate locks. Discovery can send
+commands while holding its lock (then client/command lock). Command flush releases
+its lock before taking discovery. No joins currently exist. UI releases walking
+inputs through its controller before data-source.stop; STOP can be queued behind
+a file command while polling is about to stop, so queued STOP needs preservation.
+
+Selected mechanism: track the existing worker types and accepted clients, serialize
+start/stop state changes with one small lifecycle lock, close sockets to wake IO,
+and join outside every lock against one shared deadline. Capture each loop's stop
+event. A timed-out worker remains owned and blocks restart until it exits: Python
+analysis cannot safely be forcibly killed. Shutdown gates publication/commands;
+restart resets transient observations and session/discovery/ACK state only after
+all retired workers have ended. This deliberately avoids overlapping generations
+or another worker pool/framework. Normal protocol, scheduling and retry paths stay
+unchanged. Queued high-level WALK STOP must survive poller shutdown; no new Lua
+command or claim of acknowledged input release will be introduced.
+
+
+## Phase D3: explicit transport lifecycle and bounded shutdown
+
+Implemented D3 only. BizHawkDebugServer tracks all existing owned daemon workers
+(listener, file poller, client receivers, analysis) and all accepted client sockets.
+Completed workers/sockets are removed rather than retained in an ever-growing
+client list. Per-accumulator analysis launch identity coalesces duplicate completion
+packets while analysis is running. Owned worker wrappers log unexpected exceptions
+and release tracking even when publication/cache handoff fails. Existing game
+analysis exception/failure handling is preserved.
+
+Start reserves a lifecycle transition atomically; concurrent/repeated calls launch
+one receiver pair. A failed listener cannot cause a second live fallback poller.
+Start/stop do not clear an event used by a live retired worker. Shutdown marks the
+server stopped, closes listener/all clients before acquiring the command-send lock,
+and joins workers against a **single shared one-second deadline**, outside all
+locks. Self-join is avoided. If a worker outlives that deadline, it remains owned
+and restart raises a clear RuntimeError until quiescent; it is never silently
+abandoned or overlapped with a new generation. This conservative restart deferral
+is intentional: Python CPU analysis cannot safely be forcibly terminated. Repeated
+stop remains safe and can retry pending cleanup.
+
+Stopped snapshot getters return no live data. Authoritative snapshot publication
+and normal command paths check shutdown under their existing locks. Analysis
+checks both shutdown and accumulator identity before finalization publication.
+Once quiescent, shutdown/restart clears transient snapshots, discovery/cache/search
+state, inspection baselines, file reader positions and coordinate events. WALK
+sequence remains monotonic; persisted game/save files, backups and domain state
+are untouched. A restart does not reuse old ACK snapshots or incomplete discoveries.
+
+### Windows read cancellation and release safety
+
+Deterministic socket tests on this host reproduced that shutdown/close does not
+wake a socket-backed text readline until its peer closes. The client reader now
+uses `select` readiness waits bounded to 100ms and 64KiB recv, plus incremental
+strict UTF-8 decoding. It preserves ordering, multi-line reads, CRLF, fragmented
+UTF-8, malformed JSON routing, and legacy final unterminated-line processing at
+normal EOF. Shutdown drops a pending fragment; no socket makefile remains open.
+No NDJSON schema, general line-size cap, Lua reader or transport command changes.
+Listener accept timeout remains 500ms and fallback polling 100ms.
+
+The UI still stops Friendship Walk before data-source.stop. If file STOP is queued
+behind an unconsumed command, shutdown atomically promotes the newest queued STOP
+using the existing command-file publisher. This safety-only shutdown path replaces
+the pending command and drops queued non-release work; normal queue ordering is
+unchanged. Publication failures/lock contention are logged and STOP remains queued
+for retry, including after joins. Late explicit STOP can still be persisted while
+stopped; START/DIRECTION/normal work cannot. No success claim about emulator input
+release is made without the existing Lua acknowledgement/watchdog protections.
+
+### Synchronization and ownership
+
+The lifecycle lock owns start/stop reservations and thread/socket tracking only.
+No joins or runtime-state reset occur while it is held. Discovery scheduling can
+briefly acquire lifecycle while holding the discovery lock; lifecycle never takes
+discovery, snapshot, client or command locks. Socket close occurs before attempting
+the send lock, waking blocked sends. Runtime reset takes existing locks separately,
+only after owned workers are quiescent. Command queue flush releases command lock
+before discovery as before. Protocol parsing, D2 retries, game validation, cache
+confirmation, walking acknowledgements and Phase B/C safety remain at their owners.
+
+Server class AST span **4,951 -> 5,158** lines. The increase is explicit tracking,
+shutdown, restart reset and Windows cancellation behavior; no line-count improvement
+is claimed. MainWindow/UI composition and the five-minute backup service do not
+change. No new worker threads or generic threading framework.
+
+### Regression coverage and verification
+
+Added **18 lifecycle cases** with Events/Barriers, local sockets and controlled
+workers, without emulator requirements or arbitrary test sleeps. Coverage includes
+repeated start/stop/restart, concurrent start reservations, stop during startup,
+failed listener with live poller, real listener close/rebind, blocked TCP reads,
+partial NDJSON, replaced clients, fragmented UTF-8/multiple messages/final EOF,
+file callback interruption, analysis cancellation, duplicate analysis scheduling,
+shutdown deadline/restart deferral, stale publication rejection, worker exceptions,
+send-lock wakeup ordering, and queued STOP promotion/failure retention. Existing
+transport/protocol/discovery/acquisition/ACK assertions are retained unchanged.
+
+Before: focused **203 passed in 9.21s**; complete suite **1,028 passed in 145.65s**.
+After focused **221 passed in 10.17s**; full **1,046 passed in 165.32s**.
+Ruff and git diff checks passed. Source and wheel builds passed.
+
+### Measurements and limitations
+
+`benchmarks/transport_lifecycle.py` compares the captured pre-D3 server against
+current code, using twenty blocked-reader local socket cycles and fifty controlled
+receiver start/stop cycles. It closes the peer and joins baseline test threads
+explicitly after each measurement so the benchmark leaves no abandoned resources.
+Before/after results are in `benchmarks/results/lifecycle-before.json` and
+`lifecycle-after.json`.
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| TCP stop-return median | 0.0164 ms | 0.2013 ms |
+| TCP stop-return maximum | 0.0696 ms | 0.3187 ms |
+| Readers still alive at stop return / 20 | 20 | 0 |
+| Controlled-loop shutdown median / 50 cycles | 0.0098 ms | 0.1760 ms |
+| Traced retained bytes after 50 cleaned cycles | 9,232 | 11,416 |
+| Traced peak bytes | 14,864 | 17,840 |
+
+The former fast return did **not** mean receiver termination. New waits cost time
+but provide completion for these fixtures. Additional fixed lifecycle ownership
+accounts for small retained-state overhead; fifty cycles completed with zero live
+workers after cleanup. No application throughput or universal shutdown-latency
+improvement is claimed. Real listener timing, scheduling and external filesystem
+latency can differ; an intentionally blocked analysis test uses a 20ms test deadline
+and verifies bounded stop plus restart refusal until released.
+
+### Remaining risks and next phase
+
+Joins are bounded; external filesystem IO and arbitrary callers holding domain
+locks are not hard real-time cancellable. CPU analysis is not forcibly interrupted;
+a hung analysis intentionally prevents restart until it exits, with a warning.
+Different cancelled scans can still finish game analysis, while identity gates
+prevent their results becoming current. Resource tracking and same-scan launch
+coalescing improve ownership without replacing scheduling with a worker pool.
+
+File records emitted after restart, including a preexisting trailing partial line,
+cannot always be distinguished from current producer records without a protocol
+sequence/generation contract. Existing fallback startup/backlog rules and Lua-run
+validation remain intact; this phase never invents new producer identifiers.
+Release delivery is best effort under IO failure, and existing emulator watchdog/
+ACK safety remains required. Live BizHawk disconnect/reconnect and input-release
+smoke checks remain manual.
+
+Recommended next bounded work: the previously documented game-specific announcement
+validation extraction, or a separately characterized immutable analysis-commit
+boundary. A cancellable worker pool/protocol epoch would be a separate design,
+not automatic Phase E work. Do not proceed further without a new request.
